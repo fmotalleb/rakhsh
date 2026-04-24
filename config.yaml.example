@@ -19,6 +19,7 @@ telegram:
   mtproto:
     fallback_enabled: true # when bot cannot fetch telegram media (e.g. large files), try mtproto user fallback
     fallback_forward_chat_id: 0 # optional relay: bot forwards message here first, then mtproto downloads from that forwarded message
+    user_id: 0 # optional; if set and sender user_id matches this, fallback skips forwarding
     api_id: 0
     api_hash: ""
     session_file: ./data/mtproto.session

@@ -102,6 +102,9 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		fallbackChatID := message.Chat.ID
 		fallbackMessageID := message.MessageID
 		shouldForward := h.cfg.Telegram.MTProto.FallbackForwardChatID != 0
+		if shouldForward && h.cfg.Telegram.MTProto.FallbackForwardChatID == message.Chat.ID {
+			shouldForward = false
+		}
 		if shouldForward && message.From != nil && h.fallback.IsSelfUser(message.From.ID) {
 			shouldForward = false
 		}
@@ -131,7 +134,18 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			)
 			_ = statusUpdater.Update("Switching to MTProto fallback...")
 		}
-		if err = h.fallback.DownloadFromBotMessage(ctx, fallbackChatID, fallbackMessageID, tempPath); err != nil {
+		_ = statusUpdater.Update("MTProto download started...")
+		if err = h.fallback.DownloadFromBotMessage(
+			ctx,
+			fallbackChatID,
+			fallbackMessageID,
+			tempPath,
+			h.cfg.Telegram.UpdateInterval,
+			func(downloaded int64, total int64) {
+				logger.Debug("mtproto progress", zap.Int64("downloaded", downloaded), zap.Int64("total", total))
+				_ = statusUpdater.Update(formatMTProtoProgress(downloaded, total))
+			},
+		); err != nil {
 			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
 			logger.Warn("mtproto fallback failed", zap.Error(err))
 			return
@@ -692,6 +706,14 @@ func formatProgress(progress downloader.Progress) string {
 		)
 	}
 	return fmt.Sprintf("Downloading... %s [attempt %d]", humanBytes(progress.Downloaded), progress.Attempt)
+}
+
+func formatMTProtoProgress(downloaded int64, total int64) string {
+	if total > 0 {
+		percent := float64(downloaded) * 100 / float64(total)
+		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)", humanBytes(downloaded), humanBytes(total), percent)
+	}
+	return fmt.Sprintf("MTProto downloading... %s", humanBytes(downloaded))
 }
 
 func humanBytes(size int64) string {

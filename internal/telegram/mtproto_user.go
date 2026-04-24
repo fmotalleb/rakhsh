@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/fmotalleb/go-tools/log"
-	"github.com/gotd/td/session"
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message"
@@ -43,16 +41,16 @@ func (b *MTProtoUserBot) Run(ctx context.Context) error {
 	if mt.APIID <= 0 || mt.APIHash == "" {
 		return errors.New("telegram.mtproto.api_id and telegram.mtproto.api_hash are required in mtproto_user mode")
 	}
-	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o755); err != nil {
-		return fmt.Errorf("create mtproto session dir: %w", err)
-	}
-
+	logger.Debug("mtproto userbot starting",
+		zap.Int("api_id", mt.APIID),
+		zap.String("session_file", mt.Session),
+		zap.String("socks5_addr", b.cfg.Proxy.SOCKS5Addr),
+	)
 	dispatcher := tg.NewUpdateDispatcher()
-	client := gotd.NewClient(mt.APIID, mt.APIHash, gotd.Options{
-		Logger:         logger,
-		SessionStorage: &session.FileStorage{Path: mt.Session},
-		UpdateHandler:  dispatcher,
-	})
+	client, err := newMTProtoClient(b.cfg, logger, dispatcher)
+	if err != nil {
+		return fmt.Errorf("init mtproto client: %w", err)
+	}
 
 	return client.Run(ctx, func(runCtx context.Context) error {
 		if err := ensureMTProtoAuth(runCtx, client, mt); err != nil {

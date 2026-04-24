@@ -5,13 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fmotalleb/go-tools/log"
-	"github.com/gotd/td/session"
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/downloader"
@@ -48,14 +47,12 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 	logger.Debug("mtproto fallback starting",
 		zap.Int("api_id", mt.APIID),
 		zap.String("session_file", mt.Session),
+		zap.String("socks5_addr", m.cfg.Proxy.SOCKS5Addr),
 	)
-	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o755); err != nil {
-		return fmt.Errorf("create mtproto session dir: %w", err)
+	client, err := newMTProtoClient(m.cfg, logger, nil)
+	if err != nil {
+		return fmt.Errorf("init mtproto client: %w", err)
 	}
-
-	client := gotd.NewClient(mt.APIID, mt.APIHash, gotd.Options{
-		SessionStorage: &session.FileStorage{Path: mt.Session},
-	})
 
 	return client.Run(ctx, func(runCtx context.Context) error {
 		if err := ensureMTProtoAuth(runCtx, client, mt); err != nil {
@@ -87,21 +84,33 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 func (m *MTProtoFallback) IsSelfUser(userID int64) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.selfID != 0 && m.selfID == userID
+	if m.selfID != 0 && m.selfID == userID {
+		return true
+	}
+	return m.cfg.Telegram.MTProto.UserID != 0 && m.cfg.Telegram.MTProto.UserID == userID
 }
 
-func (m *MTProtoFallback) DownloadFromBotMessage(ctx context.Context, botChatID int64, botMessageID int64, destination string) error {
+func (m *MTProtoFallback) DownloadFromBotMessage(
+	ctx context.Context,
+	botChatID int64,
+	botMessageID int64,
+	destination string,
+	progressInterval time.Duration,
+	progressCb func(downloaded int64, total int64),
+) error {
 	logger := log.Of(ctx)
 	logger.Debug("mtproto fallback download requested",
 		zap.Int64("bot_chat_id", botChatID),
 		zap.Int64("bot_message_id", botMessageID),
 		zap.String("destination", destination),
 	)
+	logger.Debug("waiting for mtproto fallback readiness")
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-m.ready:
 	}
+	logger.Debug("mtproto fallback ready")
 
 	m.mu.RLock()
 	api := m.api
@@ -125,9 +134,42 @@ func (m *MTProtoFallback) DownloadFromBotMessage(ctx context.Context, botChatID 
 	if err != nil {
 		return err
 	}
+	totalSize := mtprotoMessageSize(msg)
 
-	if _, err = dl.Download(api, location).ToPath(ctx, destination); err != nil {
-		return fmt.Errorf("mtproto fallback download: %w", err)
+	errChan := make(chan error, 1)
+	go func() {
+		_, downloadErr := dl.Download(api, location).ToPath(ctx, destination)
+		errChan <- downloadErr
+	}()
+
+	if progressCb != nil {
+		if progressInterval <= 0 {
+			progressInterval = 2 * time.Second
+		}
+		ticker := time.NewTicker(progressInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case downloadErr := <-errChan:
+				size := fileSizeSafe(destination)
+				progressCb(size, totalSize)
+				if downloadErr != nil {
+					return fmt.Errorf("mtproto fallback download: %w", downloadErr)
+				}
+				logger.Debug("mtproto fallback download completed", zap.String("destination", destination), zap.Int64("size", size))
+				return nil
+			case <-ticker.C:
+				size := fileSizeSafe(destination)
+				progressCb(size, totalSize)
+				logger.Debug("mtproto fallback progress", zap.Int64("downloaded", size), zap.Int64("total", totalSize))
+			}
+		}
+	}
+
+	if downloadErr := <-errChan; downloadErr != nil {
+		return fmt.Errorf("mtproto fallback download: %w", downloadErr)
 	}
 	logger.Debug("mtproto fallback download completed", zap.String("destination", destination))
 	return nil
@@ -259,6 +301,35 @@ func mtprotoLocationFromMessage(msg *tg.Message) (tg.InputFileLocationClass, err
 	default:
 		return nil, errors.New("unsupported media type for mtproto fallback")
 	}
+}
+
+func mtprotoMessageSize(msg *tg.Message) int64 {
+	media, ok := msg.GetMedia()
+	if !ok {
+		return -1
+	}
+	switch m := media.(type) {
+	case *tg.MessageMediaDocument:
+		docClass, ok := m.GetDocument()
+		if !ok {
+			return -1
+		}
+		doc, ok := docClass.(*tg.Document)
+		if !ok {
+			return -1
+		}
+		return doc.Size
+	default:
+		return -1
+	}
+}
+
+func fileSizeSafe(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 func ensureMTProtoAuth(ctx context.Context, client *gotd.Client, mt config.MTProtoConfig) error {

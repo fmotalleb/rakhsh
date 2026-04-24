@@ -17,9 +17,11 @@ import (
 var debug bool
 
 var rootCmd = &cobra.Command{
-	Use:     "rakhsh",
-	Short:   "Telegram fetch bot with direct file hosting",
-	Version: git.String(),
+	Use:          "rakhsh",
+	Short:        "Telegram fetch bot with direct file hosting",
+	Version:      git.String(),
+	SilenceUsage: true,
+
 	PersistentPreRun: func(_ *cobra.Command, _ []string) {
 		if debug {
 			log.SetDebugDefaults()
@@ -55,6 +57,7 @@ func Execute() {
 }
 
 func init() {
-	rootCmd.Flags().StringP("config", "c", "", "config file (default: reading config from stdin)")
+	rootCmd.PersistentFlags().StringP("config", "c", "", "config file (default: reading config from stdin)")
 	rootCmd.PersistentFlags().BoolVarP(&debug, "debug", "d", false, "enable debug mode")
+	rootCmd.AddCommand(mtprotoSessionCmd)
 }
