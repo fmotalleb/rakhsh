@@ -126,6 +126,10 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			} else {
 				fallbackChatID = forwardedMessage.Chat.ID
 				fallbackMessageID = forwardedMessage.MessageID
+				logger.Debug("fallback forward succeeded",
+					zap.Int64("forwarded_chat_id", fallbackChatID),
+					zap.Int64("forwarded_message_id", fallbackMessageID),
+				)
 			}
 		} else {
 			logger.Debug("mtproto fallback selected without forwarding",
@@ -147,7 +151,13 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			},
 		); err != nil {
 			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
-			logger.Warn("mtproto fallback failed", zap.Error(err))
+			logger.Warn("mtproto fallback failed",
+				zap.Error(err),
+				zap.Int64("source_chat_id", message.Chat.ID),
+				zap.Int64("source_message_id", message.MessageID),
+				zap.Int64("fallback_chat_id", fallbackChatID),
+				zap.Int64("fallback_message_id", fallbackMessageID),
+			)
 			return
 		}
 	} else {

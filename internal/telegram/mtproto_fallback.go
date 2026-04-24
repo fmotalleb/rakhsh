@@ -219,6 +219,7 @@ func fetchMessageByID(
 	inputChannel tg.InputChannelClass,
 	messageID int,
 ) (*tg.Message, error) {
+	logger := log.Of(ctx)
 	if inputChannel != nil {
 		res, err := api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{
 			Channel: inputChannel,
@@ -230,16 +231,37 @@ func fetchMessageByID(
 		return pickMessageByID(extractMessages(res), messageID)
 	}
 
-	res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+	// For users/basic groups, try exact lookup first.
+	res, err := api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: messageID}})
+	if err == nil {
+		if msg, pickErr := pickMessageByID(extractMessages(res), messageID); pickErr == nil {
+			return msg, nil
+		}
+	}
+	logger.Debug("messages.getMessages did not return target, falling back to history scan", zap.Int("message_id", messageID))
+
+	res, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:      inputPeer,
 		OffsetID:  messageID + 1,
-		AddOffset: -10,
-		Limit:     20,
+		AddOffset: -150,
+		Limit:     300,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("messages.getHistory: %w", err)
 	}
-	return pickMessageByID(extractMessages(res), messageID)
+	if msg, pickErr := pickMessageByID(extractMessages(res), messageID); pickErr == nil {
+		return msg, nil
+	}
+
+	// Last attempt: scan latest messages in peer.
+	latest, latestErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  inputPeer,
+		Limit: 300,
+	})
+	if latestErr != nil {
+		return nil, fmt.Errorf("message %d not found in mtproto history (latest scan error: %w)", messageID, latestErr)
+	}
+	return pickMessageByID(extractMessages(latest), messageID)
 }
 
 func extractMessages(res tg.MessagesMessagesClass) []tg.MessageClass {
