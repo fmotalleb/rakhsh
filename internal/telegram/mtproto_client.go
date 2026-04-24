@@ -15,7 +15,7 @@ import (
 
 func newMTProtoClient(cfg config.Config, logger *zap.Logger, updateHandler gotd.UpdateHandler) (*gotd.Client, error) {
 	mt := cfg.Telegram.MTProto
-	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o750); err != nil {
 		return nil, err
 	}
 

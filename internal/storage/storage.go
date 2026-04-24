@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // we don't need strong cryptographic primitive
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -22,7 +22,7 @@ func New(root string) *Storage {
 }
 
 func EnsureDir(path string) error {
-	return os.MkdirAll(path, 0o755)
+	return os.MkdirAll(path, 0o750)
 }
 
 func (s *Storage) Root() string {
@@ -53,13 +53,13 @@ func (s *Storage) Finalize(tempPath, originalName string) (storedName string, md
 }
 
 func FileMD5(path string) (string, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) //nolint:gosec // needs to be from variable
 	if err != nil {
 		return "", fmt.Errorf("open file for md5: %w", err)
 	}
 	defer file.Close()
 
-	hasher := md5.New() //nolint:gosec
+	hasher := md5.New() //nolint:gosec // not super important
 	if _, err = io.Copy(hasher, file); err != nil {
 		return "", fmt.Errorf("hash file: %w", err)
 	}
@@ -91,7 +91,7 @@ func ExtractHashFromName(name string) string {
 		return ""
 	}
 	for _, ch := range candidate {
-		if !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return ""
 		}
 	}

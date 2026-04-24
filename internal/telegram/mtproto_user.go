@@ -194,8 +194,7 @@ func (b *MTProtoUserBot) resolveMTProtoSource(msg *tg.Message) (string, string, 
 
 func mtprotoDocumentName(doc *tg.Document) string {
 	for _, attr := range doc.Attributes {
-		switch a := attr.(type) {
-		case *tg.DocumentAttributeFilename:
+		if a, ok := attr.(*tg.DocumentAttributeFilename); ok {
 			if strings.TrimSpace(a.FileName) != "" {
 				return a.FileName
 			}

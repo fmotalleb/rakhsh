@@ -23,7 +23,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	logger := log.Of(ctx)
 
 	if cfg.HTTP.PublicURL == "" {
-		cfg.HTTP.PublicURL = fmt.Sprintf("http://%s", cfg.HTTP.Listen.String())
+		cfg.HTTP.PublicURL = "http://" + cfg.HTTP.Listen.String()
 	}
 
 	if err := storage.EnsureDir(cfg.HTTP.Storage); err != nil {

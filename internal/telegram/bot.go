@@ -201,8 +201,9 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 	logger := log.Of(ctx)
 	if message.Document != nil {
 		name := message.Document.FileName
+		const telegramFileBin = "telegram-file.bin"
 		if name == "" {
-			name = "telegram-file.bin"
+			name = telegramFileBin
 		}
 		file, err := api.GetFile(ctx, message.Document.FileID)
 		if err != nil {
@@ -216,7 +217,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 			name = filepath.Base(file.FilePath)
 		}
 		if name == "" {
-			name = "telegram-file.bin"
+			name = telegramFileBin
 		}
 		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
@@ -723,7 +724,7 @@ func formatMTProtoProgress(downloaded int64, total int64) string {
 		percent := float64(downloaded) * 100 / float64(total)
 		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)", humanBytes(downloaded), humanBytes(total), percent)
 	}
-	return fmt.Sprintf("MTProto downloading... %s", humanBytes(downloaded))
+	return "MTProto downloading... " + humanBytes(downloaded)
 }
 
 func humanBytes(size int64) string {

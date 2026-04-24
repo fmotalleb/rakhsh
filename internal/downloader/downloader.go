@@ -54,7 +54,7 @@ func (d *Downloader) DownloadWithProgress(
 		zap.Duration("retry_delay", d.retryDelay),
 		zap.Uint64("max_file_size", d.maxFileSize),
 	)
-	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
 		return fmt.Errorf("create download dir: %w", err)
 	}
 	partPath := destination + ".part"
@@ -150,7 +150,7 @@ func (d *Downloader) downloadOnce(
 		offset = 0
 	}
 
-	file, err := os.OpenFile(partPath, flags, 0o644)
+	file, err := os.OpenFile(partPath, flags, 0o600) //nolint:gosec // needs to be from variable
 	if err != nil {
 		return fmt.Errorf("open target file: %w", err)
 	}
@@ -177,7 +177,8 @@ func (d *Downloader) downloadOnce(
 		zap.Int64("offset_before", offset),
 		zap.Int64("downloaded_total_after", offset+written),
 	)
-	if d.maxFileSize > 0 && uint64(written)+uint64(offset) >= d.maxFileSize {
+
+	if d.maxFileSize > 0 && uint64(written)+uint64(offset) >= d.maxFileSize { //nolint:gosec // unimportant conversion
 		if _, readErr := resp.Body.Read(make([]byte, 1)); readErr == nil {
 			return fmt.Errorf("file exceeds max size: %d", d.maxFileSize)
 		}
@@ -249,10 +250,10 @@ func limitForCopy(maxSize uint64, current int64) int64 {
 	if maxSize == 0 {
 		return 1<<63 - 1
 	}
-	if uint64(current) >= maxSize {
+	if uint64(current) >= maxSize { //nolint:gosec // unimportant conversion
 		return 0
 	}
-	return int64(maxSize - uint64(current))
+	return int64(maxSize - uint64(current)) //nolint:gosec // unimportant conversion
 }
 
 func fileSize(path string) (int64, error) {
@@ -268,18 +269,19 @@ func fileSize(path string) (int64, error) {
 
 func ParseFilenameFromURL(rawURL string) string {
 	segments := strings.Split(rawURL, "/")
+	const downloadBin = "download.bin"
 	if len(segments) == 0 {
-		return "download.bin"
+		return downloadBin
 	}
 	name := segments[len(segments)-1]
 	if name == "" || name == "." || name == ".." {
-		return "download.bin"
+		return downloadBin
 	}
 	if idx := strings.Index(name, "?"); idx >= 0 {
 		name = name[:idx]
 	}
 	if name == "" {
-		return "download.bin"
+		return downloadBin
 	}
 	return name
 }
