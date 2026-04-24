@@ -4,11 +4,28 @@ http:
   storage: ./data
 
 telegram:
+  mode: bot_api # bot_api | mtproto_user
+
+  # bot_api mode
   bot_token: "123456789:telegram_bot_id"
   user_token: ""                # optional fallback if bot_token is empty
-  allowed_user_ids: [123456789] # optional; empty means allow all
   poll_timeout: 30
+
+  # common
+  allowed_user_ids: [123456789] # optional; empty means allow all
   update_interval: 10s
+
+  # mtproto_user mode + bot_api fallback settings
+  mtproto:
+    fallback_enabled: true # when bot cannot fetch telegram media (e.g. large files), try mtproto user fallback
+    fallback_forward_chat_id: 0 # optional relay: bot forwards message here first, then mtproto downloads from that forwarded message
+    api_id: 0
+    api_hash: ""
+    session_file: ./data/mtproto.session
+    phone: ""      # needed only for first login if session is not authorized
+    auth_code: ""  # one-time code from Telegram app
+    password: ""   # optional 2FA password
+    device_name: rakhsh
 
 proxy:
   socks5_addr: 127.0.0.1:7890

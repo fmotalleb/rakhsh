@@ -1,52 +1,70 @@
 # Rakhsh
 
-Rakhsh is a Telegram polling bot that receives a URL or Telegram document, downloads it through SOCKS5, stores it locally, and exposes a direct HTTP link.
+Rakhsh fetches files sent through Telegram or plain URLs, stores them locally, and serves authenticated direct links.
 
-## What is implemented
+## Modes
 
-- Telegram Bot API polling mode (`getUpdates`) so Telegram never needs to reach your server.
-- SOCKS5 proxy support for both:
-  - Telegram API and Telegram file downloads
-  - External URL downloads
-- Resumable downloads with retries (`.part` + `Range` behavior similar to `curl -C -`).
-- Simple HTTP server:
-  - `GET /healthz`
-  - `GET /files/{name}?h={md5}`
-- MD5 auth token embedded in stored filename (`name_<md5>.ext`) and also used as query auth token (`h`) so no runtime file re-hash is needed for authorization checks.
-- Context-aware shutdown and zap logger usage from context.
+- `telegram.mode: bot_api` (default)
+  - Uses Telegram Bot API polling (`getUpdates`).
+  - Supports URL + document/photo/video/audio/voice/video-note from bot chats.
+  - Optional MTProto user fallback for large Telegram media when Bot API cannot fetch the file.
+- `telegram.mode: mtproto_user`
+  - Uses a real Telegram user account through MTProto (`gotd/td`) with `api_id` + `api_hash` + session storage.
+
+## Large File Fallback (Bot + User)
+
+If you keep `bot_api` mode and set `telegram.mtproto.fallback_enabled: true`, Rakhsh will:
+1. Try Bot API download first.
+2. If Bot API media fetch fails, try MTProto user download for the same chat/message.
+3. If `telegram.mtproto.fallback_forward_chat_id` is set, bot first forwards the message there, then MTProto downloads from forwarded message.
+
+Requirements for fallback to work:
+- MTProto account must be authorized (`api_id`, `api_hash`, session).
+- MTProto account must have access to the source chat/message, or you must set `fallback_forward_chat_id` to a chat the MTProto user account can access.
+
+Recommended setup:
+- Start your bot from the same Telegram user account used for MTProto.
+- Send `/ids` to the bot from that account and use returned `chat_id` as `fallback_forward_chat_id`.
+- This makes bot relay large-media messages to that chat, then MTProto can fetch reliably.
+
+## Features
+
+- SOCKS5 proxy support for outbound HTTP downloads (and Bot API HTTP requests in bot mode).
+- Resumable URL downloads (`.part` + `Range`, similar to `curl -C -`).
+- Direct file hosting via built-in HTTP server.
+- Link auth based on embedded MD5 suffix in filename + `h` query.
+- Context-aware shutdown and zap logger from context.
 
 ## Configuration
 
-Example YAML:
+See [config.yaml.example](config.yaml.example).
 
-```yaml
-http:
-  listen: 0.0.0.0:8080
-  public_url: https://example.com
-  storage: ./data
+Important for MTProto:
+- `telegram.mtproto.api_id` and `telegram.mtproto.api_hash` are required.
+- `telegram.mtproto.session_file` stores your user session.
+- If session is not authorized yet, set `phone` + one-time `auth_code` (and `password` if 2FA is enabled) for initial login.
 
-telegram:
-  bot_token: "123456:bot-token"
-  # optional fallback if bot_token is empty
-  user_token: ""
-  allowed_user_ids: [123456789]
-  poll_timeout: 30
-  update_interval: 10s
+### How to receive required MTProto info
 
-proxy:
-  socks5_addr: 127.0.0.1:1080
-  socks5_user: ""
-  socks5_password: ""
+1. `api_id` and `api_hash`
+- Go to `https://my.telegram.org/apps`.
+- Create an app and copy `api_id` and `api_hash`.
 
-download:
-  max_file_size: 0
-  max_retries: 5
-  retry_delay: 2s
-```
+2. `phone`
+- Your Telegram account phone in international format (example: `+98912...`).
 
-Notes:
-- `telegram.user_token` is supported as a fallback API token when `telegram.bot_token` is empty.
-- `download.max_file_size: 0` means unlimited.
+3. `auth_code`
+- On first run without an existing authorized session, Telegram sends a login code to your Telegram app/device.
+- Put that code in `telegram.mtproto.auth_code` and run once.
+- After successful login and session creation, you can clear `auth_code`.
+
+4. `password` (optional)
+- Only if your Telegram account has 2FA enabled.
+
+5. `fallback_forward_chat_id` (for relay fallback)
+- Send `/ids` to your bot from the relay chat.
+- Use `chat_id` from the response.
+- You can also use `/ids` to capture `from_user_id` for `allowed_user_ids`.
 
 ## Run
 
@@ -54,11 +72,7 @@ Notes:
 go run . -c config.yaml
 ```
 
-Send either:
-- a direct `http(s)` URL in text
-- a Telegram document attachment
-
-Bot replies with:
+The bot/userbot replies with links like:
 
 ```text
 File ready: https://example.com/files/file_<md5>.zip?h=<md5>

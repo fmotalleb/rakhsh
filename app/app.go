@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fmotalleb/go-tools/log"
 	"go.uber.org/zap"
@@ -33,20 +34,38 @@ func Run(ctx context.Context, cfg config.Config) error {
 	httpClient := netx.NewHTTPClient(proxyDialer)
 	dl := downloader.New(httpClient, cfg.Download.MaxRetries, cfg.Download.RetryDelay, cfg.Download.MaxFileSize)
 	store := storage.New(cfg.HTTP.Storage)
-	handler := telegram.NewHandler(cfg, dl, store)
 
 	httpSrv := httpserver.New(cfg.HTTP.Listen, cfg.HTTP.Storage)
-	bot := telegram.NewBot(httpClient, cfg, handler)
 
 	group, groupCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		logger.Info("http server started", zap.String("listen", cfg.HTTP.Listen.String()))
 		return httpSrv.Start(groupCtx)
 	})
-	group.Go(func() error {
-		logger.Info("telegram polling started")
-		return bot.Run(groupCtx)
-	})
+
+	switch strings.ToLower(cfg.Telegram.Mode) {
+	case "mtproto_user":
+		userBot := telegram.NewMTProtoUserBot(cfg, dl, store)
+		group.Go(func() error {
+			logger.Info("mtproto userbot started")
+			return userBot.Run(groupCtx)
+		})
+	default:
+		var mtprotoFallback *telegram.MTProtoFallback
+		if cfg.Telegram.MTProto.FallbackEnabled {
+			mtprotoFallback = telegram.NewMTProtoFallback(cfg)
+			group.Go(func() error {
+				logger.Info("mtproto fallback started")
+				return mtprotoFallback.Run(groupCtx)
+			})
+		}
+		handler := telegram.NewHandler(cfg, dl, store, mtprotoFallback)
+		bot := telegram.NewBot(httpClient, cfg, handler)
+		group.Go(func() error {
+			logger.Info("telegram bot api polling started")
+			return bot.Run(groupCtx)
+		})
+	}
 
 	if err := group.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err

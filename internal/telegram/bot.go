@@ -27,15 +27,16 @@ type Handler struct {
 	cfg        config.Config
 	dl         *downloader.Downloader
 	storage    *storage.Storage
+	fallback   *MTProtoFallback
 	allowedIDs map[int64]struct{}
 }
 
-func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Storage) *Handler {
+func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Storage, fallback *MTProtoFallback) *Handler {
 	allowed := make(map[int64]struct{}, len(cfg.Telegram.AllowedUserIDs))
 	for _, id := range cfg.Telegram.AllowedUserIDs {
 		allowed[id] = struct{}{}
 	}
-	return &Handler{cfg: cfg, dl: dl, storage: store, allowedIDs: allowed}
+	return &Handler{cfg: cfg, dl: dl, storage: store, fallback: fallback, allowedIDs: allowed}
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) {
@@ -47,9 +48,20 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		}
 	}
 
+	text := strings.TrimSpace(message.Text)
+	if text == "/ids" || text == "/whoami" {
+		fromID := int64(0)
+		if message.From != nil {
+			fromID = message.From.ID
+		}
+		body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
+		_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID)
+		return
+	}
+
 	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID)
 
-	fileName, sourceURL, err := h.resolveSource(ctx, api, message)
+	fileName, sourceURL, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
 	if err != nil {
 		_, _ = api.SendMessage(ctx, message.Chat.ID, "Please send a direct URL or attach a document", message.MessageID)
 		logger.Debug("message ignored", zap.Error(err))
@@ -61,10 +73,38 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		logger.Warn("cleanup temp file failed", zap.Error(removeErr), zap.String("path", tempPath))
 	}
 
-	if err = h.dl.Download(ctx, sourceURL, tempPath); err != nil {
-		_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Download failed: %v", err), message.MessageID)
-		logger.Warn("download failed", zap.Error(err), zap.String("url", sourceURL))
-		return
+	if useMTProtoFallback {
+		if h.fallback == nil {
+			_, _ = api.SendMessage(ctx, message.Chat.ID, "Download failed: mtproto fallback is not configured", message.MessageID)
+			return
+		}
+		fallbackChatID := message.Chat.ID
+		fallbackMessageID := message.MessageID
+		if h.cfg.Telegram.MTProto.FallbackForwardChatID != 0 {
+			forwardedMessage, forwardErr := api.ForwardMessage(
+				ctx,
+				h.cfg.Telegram.MTProto.FallbackForwardChatID,
+				message.Chat.ID,
+				message.MessageID,
+			)
+			if forwardErr != nil {
+				logger.Warn("fallback forward failed, trying original message for mtproto fallback", zap.Error(forwardErr))
+			} else {
+				fallbackChatID = forwardedMessage.Chat.ID
+				fallbackMessageID = forwardedMessage.MessageID
+			}
+		}
+		if err = h.fallback.DownloadFromBotMessage(ctx, fallbackChatID, fallbackMessageID, tempPath); err != nil {
+			_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Download failed: %v", err), message.MessageID)
+			logger.Warn("mtproto fallback failed", zap.Error(err))
+			return
+		}
+	} else {
+		if err = h.dl.Download(ctx, sourceURL, tempPath); err != nil {
+			_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Download failed: %v", err), message.MessageID)
+			logger.Warn("download failed", zap.Error(err), zap.String("url", sourceURL))
+			return
+		}
 	}
 
 	storedName, md5Hex, err := h.storage.Finalize(tempPath, fileName)
@@ -78,78 +118,105 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	_, _ = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, statusMessage.MessageID)
 }
 
-func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, error) {
+func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, bool, error) {
 	if message.Document != nil {
+		name := message.Document.FileName
+		if name == "" {
+			name = "telegram-file.bin"
+		}
 		file, err := api.GetFile(ctx, message.Document.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return name, "", true, nil
+			}
+			return "", "", false, err
 		}
-		name := message.Document.FileName
 		if name == "" {
 			name = filepath.Base(file.FilePath)
 		}
 		if name == "" {
 			name = "telegram-file.bin"
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 	if message.Video != nil {
+		name := message.Video.FileName
+		if name == "" {
+			name = "telegram-video.mp4"
+		}
 		file, err := api.GetFile(ctx, message.Video.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return name, "", true, nil
+			}
+			return "", "", false, err
 		}
-		name := message.Video.FileName
 		if name == "" {
 			name = fallbackNameFromPath(file.FilePath, "telegram-video.mp4")
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 	if message.Audio != nil {
+		name := message.Audio.FileName
+		if name == "" {
+			name = "telegram-audio.mp3"
+		}
 		file, err := api.GetFile(ctx, message.Audio.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return name, "", true, nil
+			}
+			return "", "", false, err
 		}
-		name := message.Audio.FileName
 		if name == "" {
 			name = fallbackNameFromPath(file.FilePath, "telegram-audio.mp3")
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 	if message.Voice != nil {
 		file, err := api.GetFile(ctx, message.Voice.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return "telegram-voice.ogg", "", true, nil
+			}
+			return "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-voice.ogg")
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 	if message.VideoNote != nil {
 		file, err := api.GetFile(ctx, message.VideoNote.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return "telegram-video-note.mp4", "", true, nil
+			}
+			return "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-video-note.mp4")
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 	if len(message.Photo) > 0 {
 		photo := pickLargestPhoto(message.Photo)
 		file, err := api.GetFile(ctx, photo.FileID)
 		if err != nil {
-			return "", "", err
+			if h.fallback != nil {
+				return "telegram-photo.jpg", "", true, nil
+			}
+			return "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-photo.jpg")
-		return name, api.BuildFileDownloadURL(file.FilePath), nil
+		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
 	}
 
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
-		return "", "", errors.New("empty message")
+		return "", "", false, errors.New("empty message")
 	}
 	match := urlRegex.FindString(text)
 	if match == "" {
-		return "", "", errors.New("no url in message")
+		return "", "", false, errors.New("no url in message")
 	}
-	return downloader.ParseFilenameFromURL(match), match, nil
+	return downloader.ParseFilenameFromURL(match), match, false, nil
 }
 
 type Bot struct {
@@ -292,6 +359,34 @@ func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
 	}
 	if !payload.OK {
 		return File{}, fmt.Errorf("getFile failed: %s", payload.Description)
+	}
+	return payload.Result, nil
+}
+
+func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int64, messageID int64) (Message, error) {
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(toChatID, 10))
+	values.Set("from_chat_id", strconv.FormatInt(fromChatID, 10))
+	values.Set("message_id", strconv.FormatInt(messageID, 10))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("forwardMessage"), strings.NewReader(values.Encode()))
+	if err != nil {
+		return Message{}, fmt.Errorf("create forwardMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return Message{}, err
+	}
+	defer resp.Body.Close()
+
+	var payload apiResponse[Message]
+	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return Message{}, err
+	}
+	if !payload.OK {
+		return Message{}, fmt.Errorf("forwardMessage failed: %s", payload.Description)
 	}
 	return payload.Result, nil
 }
