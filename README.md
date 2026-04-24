@@ -17,6 +17,7 @@ If you keep `bot_api` mode and set `telegram.mtproto.fallback_enabled: true`, Ra
 1. Try Bot API download first.
 2. If Bot API media fetch fails, try MTProto user download for the same chat/message.
 3. If `telegram.mtproto.fallback_forward_chat_id` is set, bot first forwards the message there, then MTProto downloads from forwarded message.
+4. If sender is the same as configured MTProto user, bot skips forwarding and uses direct MTProto fetch path.
 
 Requirements for fallback to work:
 - MTProto account must be authorized (`api_id`, `api_hash`, session).
@@ -33,6 +34,7 @@ Recommended setup:
 - Resumable URL downloads (`.part` + `Range`, similar to `curl -C -`).
 - Direct file hosting via built-in HTTP server.
 - Link auth based on embedded MD5 suffix in filename + `h` query.
+- Live progress updates by editing one status message (`telegram.update_interval`, default `2s`).
 - Context-aware shutdown and zap logger from context.
 
 ## Configuration

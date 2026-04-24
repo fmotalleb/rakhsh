@@ -10,12 +10,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fmotalleb/go-tools/log"
 	"github.com/gotd/td/session"
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
 
 	"github.com/fmotalleb/rakhsh/config"
 )
@@ -30,6 +32,7 @@ type MTProtoFallback struct {
 	api     *tg.Client
 	peerMgr *peers.Manager
 	dl      *downloader.Downloader
+	selfID  int64
 }
 
 func NewMTProtoFallback(cfg config.Config) *MTProtoFallback {
@@ -37,10 +40,15 @@ func NewMTProtoFallback(cfg config.Config) *MTProtoFallback {
 }
 
 func (m *MTProtoFallback) Run(ctx context.Context) error {
+	logger := log.Of(ctx)
 	mt := m.cfg.Telegram.MTProto
 	if mt.APIID <= 0 || mt.APIHash == "" {
 		return errors.New("mtproto fallback requires telegram.mtproto.api_id and telegram.mtproto.api_hash")
 	}
+	logger.Debug("mtproto fallback starting",
+		zap.Int("api_id", mt.APIID),
+		zap.String("session_file", mt.Session),
+	)
 	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o755); err != nil {
 		return fmt.Errorf("create mtproto session dir: %w", err)
 	}
@@ -63,6 +71,11 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 		m.api = tg.NewClient(client)
 		m.peerMgr = peerMgr
 		m.dl = downloader.NewDownloader()
+		status, _ := client.Auth().Status(runCtx)
+		if status != nil && status.User != nil {
+			m.selfID = status.User.ID
+			logger.Debug("mtproto fallback authorized", zap.Int64("self_user_id", m.selfID))
+		}
 		m.mu.Unlock()
 
 		m.once.Do(func() { close(m.ready) })
@@ -71,7 +84,19 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 	})
 }
 
+func (m *MTProtoFallback) IsSelfUser(userID int64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.selfID != 0 && m.selfID == userID
+}
+
 func (m *MTProtoFallback) DownloadFromBotMessage(ctx context.Context, botChatID int64, botMessageID int64, destination string) error {
+	logger := log.Of(ctx)
+	logger.Debug("mtproto fallback download requested",
+		zap.Int64("bot_chat_id", botChatID),
+		zap.Int64("bot_message_id", botMessageID),
+		zap.String("destination", destination),
+	)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -104,6 +129,7 @@ func (m *MTProtoFallback) DownloadFromBotMessage(ctx context.Context, botChatID 
 	if _, err = dl.Download(api, location).ToPath(ctx, destination); err != nil {
 		return fmt.Errorf("mtproto fallback download: %w", err)
 	}
+	logger.Debug("mtproto fallback download completed", zap.String("destination", destination))
 	return nil
 }
 
@@ -236,11 +262,13 @@ func mtprotoLocationFromMessage(msg *tg.Message) (tg.InputFileLocationClass, err
 }
 
 func ensureMTProtoAuth(ctx context.Context, client *gotd.Client, mt config.MTProtoConfig) error {
+	logger := log.Of(ctx)
 	status, err := client.Auth().Status(ctx)
 	if err != nil {
 		return fmt.Errorf("mtproto auth status: %w", err)
 	}
 	if status.Authorized {
+		logger.Debug("mtproto already authorized")
 		return nil
 	}
 
@@ -258,5 +286,6 @@ func ensureMTProtoAuth(ctx context.Context, client *gotd.Client, mt config.MTPro
 	if err = client.Auth().IfNecessary(ctx, flow); err != nil {
 		return fmt.Errorf("mtproto login: %w", err)
 	}
+	logger.Debug("mtproto login completed")
 	return nil
 }

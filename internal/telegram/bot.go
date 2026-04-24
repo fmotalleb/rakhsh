@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/fmotalleb/go-tools/log"
 	"go.uber.org/zap"
@@ -41,8 +42,20 @@ func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Sto
 
 func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) {
 	logger := log.Of(ctx)
+	logger.Debug("message received",
+		zap.Int64("chat_id", message.Chat.ID),
+		zap.Int64("message_id", message.MessageID),
+		zap.Bool("has_text", strings.TrimSpace(message.Text) != ""),
+		zap.Bool("has_document", message.Document != nil),
+		zap.Bool("has_video", message.Video != nil),
+		zap.Bool("has_audio", message.Audio != nil),
+		zap.Bool("has_voice", message.Voice != nil),
+		zap.Bool("has_video_note", message.VideoNote != nil),
+		zap.Int("photo_sizes", len(message.Photo)),
+	)
 	if message.From != nil && len(h.allowedIDs) > 0 {
 		if _, ok := h.allowedIDs[message.From.ID]; !ok {
+			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
 			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
 			return
 		}
@@ -60,13 +73,20 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	}
 
 	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID)
+	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID)
+	_ = statusUpdater.Update("Preparing download...")
 
 	fileName, sourceURL, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
 	if err != nil {
-		_, _ = api.SendMessage(ctx, message.Chat.ID, "Please send a direct URL or attach a document", message.MessageID)
+		_ = statusUpdater.Update("Please send a direct URL or attach a document")
 		logger.Debug("message ignored", zap.Error(err))
 		return
 	}
+	logger.Debug("source resolved",
+		zap.String("file_name", fileName),
+		zap.String("source_url", sourceURL),
+		zap.Bool("use_mtproto_fallback", useMTProtoFallback),
+	)
 
 	tempPath := h.storage.TempPath(fileName)
 	if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -75,12 +95,22 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 
 	if useMTProtoFallback {
 		if h.fallback == nil {
-			_, _ = api.SendMessage(ctx, message.Chat.ID, "Download failed: mtproto fallback is not configured", message.MessageID)
+			_ = statusUpdater.Update("Download failed: mtproto fallback is not configured")
 			return
 		}
 		fallbackChatID := message.Chat.ID
 		fallbackMessageID := message.MessageID
-		if h.cfg.Telegram.MTProto.FallbackForwardChatID != 0 {
+		shouldForward := h.cfg.Telegram.MTProto.FallbackForwardChatID != 0
+		if shouldForward && message.From != nil && h.fallback.IsSelfUser(message.From.ID) {
+			shouldForward = false
+		}
+		if shouldForward {
+			_ = statusUpdater.Update("Switching to MTProto fallback (relay)...")
+			logger.Debug("mtproto fallback selected with relay forwarding",
+				zap.Int64("from_chat_id", message.Chat.ID),
+				zap.Int64("from_message_id", message.MessageID),
+				zap.Int64("fallback_forward_chat_id", h.cfg.Telegram.MTProto.FallbackForwardChatID),
+			)
 			forwardedMessage, forwardErr := api.ForwardMessage(
 				ctx,
 				h.cfg.Telegram.MTProto.FallbackForwardChatID,
@@ -93,15 +123,34 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				fallbackChatID = forwardedMessage.Chat.ID
 				fallbackMessageID = forwardedMessage.MessageID
 			}
+		} else {
+			logger.Debug("mtproto fallback selected without forwarding",
+				zap.Int64("chat_id", message.Chat.ID),
+				zap.Int64("message_id", message.MessageID),
+			)
+			_ = statusUpdater.Update("Switching to MTProto fallback...")
 		}
 		if err = h.fallback.DownloadFromBotMessage(ctx, fallbackChatID, fallbackMessageID, tempPath); err != nil {
-			_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Download failed: %v", err), message.MessageID)
+			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
 			logger.Warn("mtproto fallback failed", zap.Error(err))
 			return
 		}
 	} else {
-		if err = h.dl.Download(ctx, sourceURL, tempPath); err != nil {
-			_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Download failed: %v", err), message.MessageID)
+		if err = h.dl.DownloadWithProgress(
+			ctx,
+			sourceURL,
+			tempPath,
+			h.cfg.Telegram.UpdateInterval,
+			func(progress downloader.Progress) {
+				logger.Debug("download progress",
+					zap.Int64("downloaded", progress.Downloaded),
+					zap.Int64("total", progress.Total),
+					zap.Uint("attempt", progress.Attempt),
+				)
+				_ = statusUpdater.Update(formatProgress(progress))
+			},
+		); err != nil {
+			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
 			logger.Warn("download failed", zap.Error(err), zap.String("url", sourceURL))
 			return
 		}
@@ -109,16 +158,22 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 
 	storedName, md5Hex, err := h.storage.Finalize(tempPath, fileName)
 	if err != nil {
-		_, _ = api.SendMessage(ctx, message.Chat.ID, fmt.Sprintf("Save failed: %v", err), message.MessageID)
+		_ = statusUpdater.Update(fmt.Sprintf("Save failed: %v", err))
 		logger.Error("finalize failed", zap.Error(err))
 		return
 	}
 
 	publicURL := strings.TrimRight(h.cfg.HTTP.PublicURL, "/") + "/files/" + url.PathEscape(storedName) + "?h=" + md5Hex
-	_, _ = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, statusMessage.MessageID)
+	logger.Debug("file finalized",
+		zap.String("stored_name", storedName),
+		zap.String("md5", md5Hex),
+		zap.String("public_url", publicURL),
+	)
+	_ = statusUpdater.Update("File ready: " + publicURL)
 }
 
 func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, bool, error) {
+	logger := log.Of(ctx)
 	if message.Document != nil {
 		name := message.Document.FileName
 		if name == "" {
@@ -126,6 +181,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		}
 		file, err := api.GetFile(ctx, message.Document.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for document, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return name, "", true, nil
 			}
@@ -146,6 +202,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		}
 		file, err := api.GetFile(ctx, message.Video.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for video, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return name, "", true, nil
 			}
@@ -163,6 +220,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		}
 		file, err := api.GetFile(ctx, message.Audio.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for audio, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return name, "", true, nil
 			}
@@ -176,6 +234,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 	if message.Voice != nil {
 		file, err := api.GetFile(ctx, message.Voice.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for voice, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return "telegram-voice.ogg", "", true, nil
 			}
@@ -187,6 +246,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 	if message.VideoNote != nil {
 		file, err := api.GetFile(ctx, message.VideoNote.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for video note, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return "telegram-video-note.mp4", "", true, nil
 			}
@@ -199,6 +259,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		photo := pickLargestPhoto(message.Photo)
 		file, err := api.GetFile(ctx, photo.FileID)
 		if err != nil {
+			logger.Debug("bot getFile failed for photo, considering fallback", zap.Error(err))
 			if h.fallback != nil {
 				return "telegram-photo.jpg", "", true, nil
 			}
@@ -249,6 +310,7 @@ func (b *Bot) Run(ctx context.Context) error {
 			logger.Warn("getUpdates failed", zap.Error(err))
 			continue
 		}
+		logger.Debug("updates received", zap.Int("count", len(updates)), zap.Int64("offset", offset))
 		for _, update := range updates {
 			if update.UpdateID >= offset {
 				offset = update.UpdateID + 1
@@ -280,6 +342,11 @@ func (a *API) endpoint(method string) string {
 }
 
 func (a *API) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "getUpdates"),
+		zap.Int64("offset", offset),
+		zap.Int("timeout", timeout),
+	)
 	values := url.Values{}
 	values.Set("offset", strconv.FormatInt(offset, 10))
 	values.Set("timeout", strconv.Itoa(timeout))
@@ -296,6 +363,7 @@ func (a *API) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Upda
 		return nil, fmt.Errorf("getUpdates request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "getUpdates"), zap.Int("status_code", resp.StatusCode))
 
 	var payload apiResponse[[]Update]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -308,6 +376,12 @@ func (a *API) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Upda
 }
 
 func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error) {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "sendMessage"),
+		zap.Int64("chat_id", chatID),
+		zap.Int64("reply_to_message_id", replyTo),
+		zap.Int("text_length", len(text)),
+	)
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("text", text)
@@ -326,6 +400,7 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 		return Message{}, err
 	}
 	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "sendMessage"), zap.Int("status_code", resp.StatusCode))
 
 	var payload apiResponse[Message]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -338,6 +413,10 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 }
 
 func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "getFile"),
+		zap.String("file_id", fileID),
+	)
 	values := url.Values{}
 	values.Set("file_id", fileID)
 
@@ -352,6 +431,7 @@ func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
 		return File{}, err
 	}
 	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "getFile"), zap.Int("status_code", resp.StatusCode))
 
 	var payload apiResponse[File]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -364,6 +444,12 @@ func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
 }
 
 func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int64, messageID int64) (Message, error) {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "forwardMessage"),
+		zap.Int64("to_chat_id", toChatID),
+		zap.Int64("from_chat_id", fromChatID),
+		zap.Int64("message_id", messageID),
+	)
 	values := url.Values{}
 	values.Set("chat_id", strconv.FormatInt(toChatID, 10))
 	values.Set("from_chat_id", strconv.FormatInt(fromChatID, 10))
@@ -380,6 +466,7 @@ func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int
 		return Message{}, err
 	}
 	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "forwardMessage"), zap.Int("status_code", resp.StatusCode))
 
 	var payload apiResponse[Message]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -389,6 +476,41 @@ func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int
 		return Message{}, fmt.Errorf("forwardMessage failed: %s", payload.Description)
 	}
 	return payload.Result, nil
+}
+
+func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "editMessageText"),
+		zap.Int64("chat_id", chatID),
+		zap.Int64("message_id", messageID),
+		zap.Int("text_length", len(text)),
+	)
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(chatID, 10))
+	values.Set("message_id", strconv.FormatInt(messageID, 10))
+	values.Set("text", text)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("editMessageText"), strings.NewReader(values.Encode()))
+	if err != nil {
+		return fmt.Errorf("create editMessageText request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "editMessageText"), zap.Int("status_code", resp.StatusCode))
+
+	var payload apiResponse[json.RawMessage]
+	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.OK {
+		return fmt.Errorf("editMessageText failed: %s", payload.Description)
+	}
+	return nil
 }
 
 type apiResponse[T any] struct {
@@ -484,4 +606,62 @@ func fallbackNameFromPath(filePath, fallback string) string {
 		return fallback
 	}
 	return name
+}
+
+type statusUpdater struct {
+	ctx       context.Context
+	api       *API
+	chatID    int64
+	messageID int64
+	mu        sync.Mutex
+	lastText  string
+}
+
+func newStatusUpdater(ctx context.Context, api *API, chatID int64, messageID int64) *statusUpdater {
+	return &statusUpdater{
+		ctx:       ctx,
+		api:       api,
+		chatID:    chatID,
+		messageID: messageID,
+	}
+}
+
+func (u *statusUpdater) Update(text string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if text == "" || text == u.lastText {
+		return nil
+	}
+	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text); err != nil {
+		return err
+	}
+	u.lastText = text
+	return nil
+}
+
+func formatProgress(progress downloader.Progress) string {
+	if progress.Total > 0 {
+		percent := float64(progress.Downloaded) * 100 / float64(progress.Total)
+		return fmt.Sprintf(
+			"Downloading... %s / %s (%.1f%%) [attempt %d]",
+			humanBytes(progress.Downloaded),
+			humanBytes(progress.Total),
+			percent,
+			progress.Attempt,
+		)
+	}
+	return fmt.Sprintf("Downloading... %s [attempt %d]", humanBytes(progress.Downloaded), progress.Attempt)
+}
+
+func humanBytes(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	const unit = 1024
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(size)/float64(div), "KMGTPE"[exp])
 }

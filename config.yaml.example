@@ -13,7 +13,7 @@ telegram:
 
   # common
   allowed_user_ids: [123456789] # optional; empty means allow all
-  update_interval: 10s
+  update_interval: 2s # progress update interval (status message is edited in-place)
 
   # mtproto_user mode + bot_api fallback settings
   mtproto:

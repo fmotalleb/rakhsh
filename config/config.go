@@ -68,7 +68,7 @@ func (c *Config) ApplyDefaults() {
 		c.Telegram.PollTimeout = 30
 	}
 	if c.Telegram.UpdateInterval <= 0 {
-		c.Telegram.UpdateInterval = 10 * time.Second
+		c.Telegram.UpdateInterval = 2 * time.Second
 	}
 	if c.Telegram.MTProto.Session == "" {
 		c.Telegram.MTProto.Session = filepath.Clean("./data/mtproto.session")

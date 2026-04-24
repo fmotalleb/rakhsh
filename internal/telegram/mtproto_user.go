@@ -56,6 +56,7 @@ func (b *MTProtoUserBot) Run(ctx context.Context) error {
 		if err := ensureMTProtoAuth(runCtx, client, mt); err != nil {
 			return err
 		}
+		logger.Debug("mtproto userbot authorized")
 
 		sender := message.NewSender(tg.NewClient(client))
 		download := downloader.NewDownloader()
@@ -82,6 +83,10 @@ func (b *MTProtoUserBot) handleNewMessage(
 	if !ok || msg.Out {
 		return nil
 	}
+	logger.Debug("mtproto message received",
+		zap.Int("message_id", msg.ID),
+		zap.Bool("has_text", strings.TrimSpace(msg.Message) != ""),
+	)
 
 	fromID, hasFrom := msg.GetFromID()
 	if hasFrom && len(b.cfg.Telegram.AllowedUserIDs) > 0 {
@@ -96,6 +101,11 @@ func (b *MTProtoUserBot) handleNewMessage(
 	if err != nil {
 		return nil
 	}
+	logger.Debug("mtproto source resolved",
+		zap.String("file_name", fileName),
+		zap.String("direct_url", directURL),
+		zap.Bool("use_location", location != nil),
+	)
 
 	tempPath := b.storage.TempPath(fileName)
 	if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
@@ -108,6 +118,7 @@ func (b *MTProtoUserBot) handleNewMessage(
 			return nil
 		}
 	} else {
+		logger.Debug("mtproto downloader started", zap.String("temp_path", tempPath))
 		if _, err = download.Download(client.API(), location).ToPath(ctx, tempPath); err != nil {
 			_, _ = sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Telegram media download failed: %v", err))
 			return nil
@@ -120,6 +131,11 @@ func (b *MTProtoUserBot) handleNewMessage(
 		return nil
 	}
 	publicURL := strings.TrimRight(b.cfg.HTTP.PublicURL, "/") + "/files/" + url.PathEscape(storedName) + "?h=" + md5Hex
+	logger.Debug("mtproto file finalized",
+		zap.String("stored_name", storedName),
+		zap.String("md5", md5Hex),
+		zap.String("public_url", publicURL),
+	)
 	_, _ = sender.Reply(entities, update).Text(ctx, "File ready: "+publicURL)
 	return nil
 }

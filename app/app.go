@@ -38,6 +38,11 @@ func Run(ctx context.Context, cfg config.Config) error {
 	httpSrv := httpserver.New(cfg.HTTP.Listen, cfg.HTTP.Storage)
 
 	group, groupCtx := errgroup.WithContext(ctx)
+	logger.Debug("application runtime configuration",
+		zap.String("telegram_mode", strings.ToLower(cfg.Telegram.Mode)),
+		zap.Bool("mtproto_fallback_enabled", cfg.Telegram.MTProto.FallbackEnabled),
+		zap.String("storage_path", cfg.HTTP.Storage),
+	)
 	group.Go(func() error {
 		logger.Info("http server started", zap.String("listen", cfg.HTTP.Listen.String()))
 		return httpSrv.Start(groupCtx)

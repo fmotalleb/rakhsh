@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	toollog "github.com/fmotalleb/go-tools/log"
+	"go.uber.org/zap"
 )
 
 type Downloader struct {
@@ -20,11 +23,37 @@ type Downloader struct {
 	maxFileSize uint64
 }
 
+type Progress struct {
+	Downloaded int64
+	Total      int64
+	Attempt    uint
+}
+
+type ProgressFunc func(Progress)
+
 func New(client *http.Client, maxRetries uint, retryDelay time.Duration, maxFileSize uint64) *Downloader {
 	return &Downloader{client: client, maxRetries: maxRetries, retryDelay: retryDelay, maxFileSize: maxFileSize}
 }
 
 func (d *Downloader) Download(ctx context.Context, sourceURL, destination string) error {
+	return d.DownloadWithProgress(ctx, sourceURL, destination, 2*time.Second, nil)
+}
+
+func (d *Downloader) DownloadWithProgress(
+	ctx context.Context,
+	sourceURL string,
+	destination string,
+	interval time.Duration,
+	progressCb ProgressFunc,
+) error {
+	logger := toollog.Of(ctx)
+	logger.Debug("download started",
+		zap.String("source_url", sourceURL),
+		zap.String("destination", destination),
+		zap.Uint("max_retries", d.maxRetries),
+		zap.Duration("retry_delay", d.retryDelay),
+		zap.Uint64("max_file_size", d.maxFileSize),
+	)
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return fmt.Errorf("create download dir: %w", err)
 	}
@@ -32,18 +61,32 @@ func (d *Downloader) Download(ctx context.Context, sourceURL, destination string
 
 	var lastErr error
 	for attempt := uint(0); attempt <= d.maxRetries; attempt++ {
+		logger.Debug("download attempt",
+			zap.Uint("attempt", attempt+1),
+			zap.Uint("max_attempts", d.maxRetries+1),
+			zap.String("source_url", sourceURL),
+			zap.String("part_path", partPath),
+		)
 		if attempt > 0 {
 			if err := sleepContext(ctx, d.retryDelay); err != nil {
 				return err
 			}
 		}
-		if err := d.downloadOnce(ctx, sourceURL, partPath); err != nil {
+		if err := d.downloadOnce(ctx, sourceURL, partPath, attempt+1, interval, progressCb); err != nil {
+			logger.Debug("download attempt failed",
+				zap.Uint("attempt", attempt+1),
+				zap.Error(err),
+			)
 			lastErr = err
 			continue
 		}
 		if err := os.Rename(partPath, destination); err != nil {
 			return fmt.Errorf("finalize file: %w", err)
 		}
+		logger.Debug("download completed",
+			zap.String("source_url", sourceURL),
+			zap.String("destination", destination),
+		)
 		return nil
 	}
 
@@ -53,11 +96,20 @@ func (d *Downloader) Download(ctx context.Context, sourceURL, destination string
 	return fmt.Errorf("download failed after retries: %w", lastErr)
 }
 
-func (d *Downloader) downloadOnce(ctx context.Context, sourceURL, partPath string) error {
+func (d *Downloader) downloadOnce(
+	ctx context.Context,
+	sourceURL string,
+	partPath string,
+	attempt uint,
+	interval time.Duration,
+	progressCb ProgressFunc,
+) error {
+	logger := toollog.Of(ctx)
 	offset, err := fileSize(partPath)
 	if err != nil {
 		return err
 	}
+	logger.Debug("resume state", zap.Int64("offset", offset), zap.String("part_path", partPath))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
@@ -72,12 +124,22 @@ func (d *Downloader) downloadOnce(ctx context.Context, sourceURL, partPath strin
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	logger.Debug("download response received",
+		zap.Int("status_code", resp.StatusCode),
+		zap.String("content_range", resp.Header.Get("Content-Range")),
+		zap.String("content_length", resp.Header.Get("Content-Length")),
+	)
 
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		return nil
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("unexpected response code: %d", resp.StatusCode)
+	}
+	totalSize := responseTotalSize(resp, offset)
+	logger.Debug("resolved total size", zap.Int64("total_size", totalSize), zap.Int64("offset", offset))
+	if progressCb != nil {
+		progressCb(Progress{Downloaded: offset, Total: totalSize, Attempt: attempt})
 	}
 
 	flags := os.O_CREATE | os.O_WRONLY
@@ -94,16 +156,93 @@ func (d *Downloader) downloadOnce(ctx context.Context, sourceURL, partPath strin
 	}
 	defer file.Close()
 
-	written, err := io.Copy(file, io.LimitReader(resp.Body, limitForCopy(d.maxFileSize, offset)))
+	reader := io.LimitReader(resp.Body, limitForCopy(d.maxFileSize, offset))
+	if progressCb != nil {
+		reader = &progressReader{
+			reader:     reader,
+			downloaded: offset,
+			total:      totalSize,
+			attempt:    attempt,
+			lastEmit:   time.Now(),
+			interval:   interval,
+			progressCb: progressCb,
+		}
+	}
+	written, err := io.Copy(file, reader)
 	if err != nil {
 		return fmt.Errorf("stream to disk: %w", err)
 	}
+	logger.Debug("chunk downloaded",
+		zap.Int64("written_this_attempt", written),
+		zap.Int64("offset_before", offset),
+		zap.Int64("downloaded_total_after", offset+written),
+	)
 	if d.maxFileSize > 0 && uint64(written)+uint64(offset) >= d.maxFileSize {
 		if _, readErr := resp.Body.Read(make([]byte, 1)); readErr == nil {
 			return fmt.Errorf("file exceeds max size: %d", d.maxFileSize)
 		}
 	}
 	return nil
+}
+
+func responseTotalSize(resp *http.Response, offset int64) int64 {
+	if resp == nil {
+		return -1
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		rangeHeader := resp.Header.Get("Content-Range")
+		if rangeHeader != "" {
+			parts := strings.Split(rangeHeader, "/")
+			if len(parts) == 2 {
+				total, err := strconv.ParseInt(parts[1], 10, 64)
+				if err == nil {
+					return total
+				}
+			}
+		}
+	}
+	length := ExtractSizeHeader(resp)
+	if length < 0 {
+		return -1
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		return offset + length
+	}
+	return length
+}
+
+type progressReader struct {
+	reader     io.Reader
+	downloaded int64
+	total      int64
+	attempt    uint
+	lastEmit   time.Time
+	interval   time.Duration
+	progressCb ProgressFunc
+}
+
+func (r *progressReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		r.downloaded += int64(n)
+		now := time.Now()
+		if now.Sub(r.lastEmit) >= r.interval {
+			r.progressCb(Progress{
+				Downloaded: r.downloaded,
+				Total:      r.total,
+				Attempt:    r.attempt,
+			})
+			r.lastEmit = now
+		}
+	}
+	if err == io.EOF {
+		r.progressCb(Progress{
+			Downloaded: r.downloaded,
+			Total:      r.total,
+			Attempt:    r.attempt,
+		})
+	}
+	return n, err
 }
 
 func limitForCopy(maxSize uint64, current int64) int64 {
