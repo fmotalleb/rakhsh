@@ -1,0 +1,21 @@
+http:
+  listen: 0.0.0.0:8080
+  public_url: https://example.com
+  storage: ./data
+
+telegram:
+  bot_token: "123456789:telegram_bot_id"
+  user_token: ""                # optional fallback if bot_token is empty
+  allowed_user_ids: [123456789] # optional; empty means allow all
+  poll_timeout: 30
+  update_interval: 10s
+
+proxy:
+  socks5_addr: 127.0.0.1:7890
+  socks5_user: ""
+  socks5_password: ""
+
+download:
+  max_file_size: 0   # 0 = unlimited
+  max_retries: 5
+  retry_delay: 2s

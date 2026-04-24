@@ -1,98 +1,65 @@
 # Rakhsh
 
-Rakhsh is a Telegram bot that fetches files from the internet/telegram and makes them accessible via direct hosting links.
+Rakhsh is a Telegram polling bot that receives a URL or Telegram document, downloads it through SOCKS5, stores it locally, and exposes a direct HTTP link.
 
-## Overview
+## What is implemented
 
-Rakhsh acts as a lightweight fetcher:
-
-* Accepts a URL/File via Telegram
-* Downloads the file
-* Stores it on a server
-* Returns a public link for access
-
-Designed for simplicity, automation, and minimal user interaction.
-
-## Features
-
-* URL-based file fetching
-* Telegram file fetching
-* Automatic file hosting
-* Direct download links
-* Stateless interaction via Telegram
-* Suitable for automation workflows
-
-## How It Works
-
-1. User sends a URL/File to the bot
-2. Rakhsh downloads the file
-3. File is stored on configured storage
-4. Bot replies with a public link
-
-As per url generated will require you to pass md5 sum of the file in query parameter, server does not have a authentication system yet.
-
-## Requirements
-
-* Telegram Bot Token
-* Telegram User Token (optional)
-* Publicly accessible storage endpoint
-* Server with outbound internet access (or access to internet via socks5 proxy)
-* Optional: reverse proxy for file serving
+- Telegram Bot API polling mode (`getUpdates`) so Telegram never needs to reach your server.
+- SOCKS5 proxy support for both:
+  - Telegram API and Telegram file downloads
+  - External URL downloads
+- Resumable downloads with retries (`.part` + `Range` behavior similar to `curl -C -`).
+- Simple HTTP server:
+  - `GET /healthz`
+  - `GET /files/{name}?h={md5}`
+- MD5 auth token embedded in stored filename (`name_<md5>.ext`) and also used as query auth token (`h`) so no runtime file re-hash is needed for authorization checks.
+- Context-aware shutdown and zap logger usage from context.
 
 ## Configuration
 
-Environment variables:
+Example YAML:
 
+```yaml
+http:
+  listen: 0.0.0.0:8080
+  public_url: https://example.com
+  storage: ./data
+
+telegram:
+  bot_token: "123456:bot-token"
+  # optional fallback if bot_token is empty
+  user_token: ""
+  allowed_user_ids: [123456789]
+  poll_timeout: 30
+  update_interval: 10s
+
+proxy:
+  socks5_addr: 127.0.0.1:1080
+  socks5_user: ""
+  socks5_password: ""
+
+download:
+  max_file_size: 0
+  max_retries: 5
+  retry_delay: 2s
 ```
-TELEGRAM_BOT_TOKEN=<your_token>
-STORAGE_PATH=<local_or_remote_path>
-PUBLIC_BASE_URL=<https://your-domain/files>
-MAX_FILE_SIZE=<bytes>
+
+Notes:
+- `telegram.user_token` is supported as a fallback API token when `telegram.bot_token` is empty.
+- `download.max_file_size: 0` means unlimited.
+
+## Run
+
+```bash
+go run . -c config.yaml
 ```
 
-## Usage
+Send either:
+- a direct `http(s)` URL in text
+- a Telegram document attachment
 
-Start the bot and send a message:
+Bot replies with:
 
+```text
+File ready: https://example.com/files/file_<md5>.zip?h=<md5>
 ```
-https://example.com/file.zip
-```
-
-Response:
-
-```
-File ready: https://your-domain/files/abc123.zip
-```
-
-## Deployment
-
-Typical setup:
-
-* Bot service (Go/Rust recommended)
-* File storage (local disk, S3-compatible, or NFS)
-* HTTP server (nginx, caddy) to expose files
-
-## Security Considerations
-
-* Enforce file size limits
-* Validate URLs and content types
-* Prevent SSRF by restricting internal IP ranges
-* Optionally require authentication or allowlist users
-
-## Limitations
-
-* Large files depend on available bandwidth and storage
-* No built-in deduplication
-* No resumable downloads by default
-
-## Future Improvements
-
-* Queue system for large downloads
-* Deduplication and caching
-* Expiration policies for hosted files
-* Parallel downloads
-* Web UI for management
-
-## License
-
-MIT
