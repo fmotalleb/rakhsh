@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fmotalleb/go-tools/log"
 	"go.uber.org/zap"
@@ -284,11 +285,12 @@ type Bot struct {
 	api     *API
 	handler *Handler
 	cfg     config.Config
+	started int64
 }
 
 func NewBot(client *http.Client, cfg config.Config, handler *Handler) *Bot {
 	token := cfg.TelegramAPIToken()
-	return &Bot{api: NewAPI(client, token), handler: handler, cfg: cfg}
+	return &Bot{api: NewAPI(client, token), handler: handler, cfg: cfg, started: time.Now().Unix()}
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -297,6 +299,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	logger := log.Of(ctx)
 	offset := int64(0)
+	offset = b.dropPendingUpdates(ctx)
 
 	for {
 		select {
@@ -318,9 +321,38 @@ func (b *Bot) Run(ctx context.Context) error {
 			if update.Message == nil {
 				continue
 			}
+			if update.Message.Date > 0 && int64(update.Message.Date) < b.started {
+				logger.Debug("ignoring old message", zap.Int64("message_date", int64(update.Message.Date)), zap.Int64("started", b.started))
+				continue
+			}
 			b.handler.HandleMessage(ctx, b.api, *update.Message)
 		}
 	}
+}
+
+func (b *Bot) dropPendingUpdates(ctx context.Context) int64 {
+	logger := log.Of(ctx)
+	var offset int64
+	for i := 0; i < 10; i++ {
+		updates, err := b.api.GetUpdatesWithLimit(ctx, offset, 0, 100)
+		if err != nil {
+			logger.Warn("failed to drop pending updates, continuing with normal polling", zap.Error(err))
+			return offset
+		}
+		if len(updates) == 0 {
+			if offset > 0 {
+				logger.Debug("dropped pending updates on startup", zap.Int64("offset", offset))
+			}
+			return offset
+		}
+		for _, update := range updates {
+			if update.UpdateID >= offset {
+				offset = update.UpdateID + 1
+			}
+		}
+	}
+	logger.Debug("startup drain hit max rounds", zap.Int64("offset", offset))
+	return offset
 }
 
 type API struct {
@@ -342,14 +374,22 @@ func (a *API) endpoint(method string) string {
 }
 
 func (a *API) GetUpdates(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+	return a.GetUpdatesWithLimit(ctx, offset, timeout, 0)
+}
+
+func (a *API) GetUpdatesWithLimit(ctx context.Context, offset int64, timeout int, limit int) ([]Update, error) {
 	log.Of(ctx).Debug("telegram api request",
 		zap.String("method", "getUpdates"),
 		zap.Int64("offset", offset),
 		zap.Int("timeout", timeout),
+		zap.Int("limit", limit),
 	)
 	values := url.Values{}
 	values.Set("offset", strconv.FormatInt(offset, 10))
 	values.Set("timeout", strconv.Itoa(timeout))
+	if limit > 0 {
+		values.Set("limit", strconv.Itoa(limit))
+	}
 	values.Set("allowed_updates", `["message"]`)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("getUpdates"), strings.NewReader(values.Encode()))
@@ -528,6 +568,7 @@ type Message struct {
 	MessageID int64      `json:"message_id"`
 	From      *User      `json:"from"`
 	Chat      Chat       `json:"chat"`
+	Date      int        `json:"date"`
 	Text      string     `json:"text"`
 	Document  *Document  `json:"document"`
 	Photo     []Photo    `json:"photo"`

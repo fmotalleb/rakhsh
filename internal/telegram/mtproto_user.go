@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/fmotalleb/go-tools/log"
 	"github.com/gotd/td/session"
@@ -29,10 +30,11 @@ type MTProtoUserBot struct {
 	cfg     config.Config
 	dl      *idownloader.Downloader
 	storage *storage.Storage
+	started int64
 }
 
 func NewMTProtoUserBot(cfg config.Config, dl *idownloader.Downloader, store *storage.Storage) *MTProtoUserBot {
-	return &MTProtoUserBot{cfg: cfg, dl: dl, storage: store}
+	return &MTProtoUserBot{cfg: cfg, dl: dl, storage: store, started: time.Now().Unix()}
 }
 
 func (b *MTProtoUserBot) Run(ctx context.Context) error {
@@ -81,6 +83,10 @@ func (b *MTProtoUserBot) handleNewMessage(
 	logger := log.Of(ctx)
 	msg, ok := update.Message.(*tg.Message)
 	if !ok || msg.Out {
+		return nil
+	}
+	if msg.Date > 0 && int64(msg.Date) < b.started {
+		logger.Debug("ignoring old mtproto message", zap.Int64("message_date", int64(msg.Date)), zap.Int64("started", b.started))
 		return nil
 	}
 	logger.Debug("mtproto message received",
