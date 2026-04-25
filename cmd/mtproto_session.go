@@ -29,6 +29,10 @@ var mtprotoSessionCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		socks5, err := cmd.Flags().GetString("socks5")
+		if err != nil {
+			return err
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
@@ -45,6 +49,9 @@ var mtprotoSessionCmd = &cobra.Command{
 					APIHash: apiHash,
 				},
 			},
+			Proxy: config.ProxyConfig{
+				SOCKS5Addr: socks5,
+			},
 		}
 
 		return telegram.InteractiveMTProtoSession(ctx, cfg)
@@ -55,4 +62,5 @@ func init() {
 	mtprotoSessionCmd.Flags().StringP("session", "s", "./data/mtproto.session", "Session file path")
 	mtprotoSessionCmd.Flags().Int("api-id", 0, "API ID")
 	mtprotoSessionCmd.Flags().String("api-hash", "", "API Hash")
+	mtprotoSessionCmd.Flags().String("socks5", "", "SOCKS5 proxy address")
 }
