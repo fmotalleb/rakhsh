@@ -1,23 +1,45 @@
 package telegram
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/fmotalleb/go-tools/log"
+	"github.com/gotd/td/telegram/auth"
 	"go.uber.org/zap"
 
 	"github.com/fmotalleb/rakhsh/config"
 )
 
-func CreateMTProtoSession(ctx context.Context, cfg config.Config) error {
+func InteractiveMTProtoSession(ctx context.Context, cfg config.Config) error {
 	logger := log.Of(ctx)
 	cfg.ApplyDefaults()
 	mt := cfg.Telegram.MTProto
 
-	if mt.APIID <= 0 || mt.APIHash == "" {
-		return errors.New("telegram.mtproto.api_id and telegram.mtproto.api_hash are required")
+	if mt.APIID == 0 {
+		fmt.Print("Enter API ID: ")
+		apiIDStr, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return err
+		}
+		apiID, err := strconv.Atoi(strings.TrimSpace(apiIDStr))
+		if err != nil {
+			return errors.New("invalid api id")
+		}
+		mt.APIID = apiID
+	}
+	if mt.APIHash == "" {
+		fmt.Print("Enter API Hash: ")
+		apiHash, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return err
+		}
+		mt.APIHash = strings.TrimSpace(apiHash)
 	}
 
 	logger.Info("starting mtproto session creation",
@@ -25,54 +47,33 @@ func CreateMTProtoSession(ctx context.Context, cfg config.Config) error {
 		zap.String("session_file", mt.Session),
 		zap.String("socks5_addr", cfg.Proxy.SOCKS5Addr),
 	)
-
 	client, err := newMTProtoClient(cfg, logger, nil)
 	if err != nil {
 		return fmt.Errorf("init mtproto client: %w", err)
 	}
+	fmt.Print("Enter Phone Number: ")
+	phone, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	flow := auth.NewFlow(
+		NewInteractiveAuth(strings.TrimSpace(phone)),
+		auth.SendCodeOptions{},
+	)
 
 	return client.Run(ctx, func(runCtx context.Context) error {
-		logger.Info("checking mtproto authorization state")
-		status, statusErr := client.Auth().Status(runCtx)
-		if statusErr != nil {
-			return fmt.Errorf("check auth status: %w", statusErr)
+		if err := client.Auth().IfNecessary(runCtx, flow); err != nil {
+			return err
 		}
-		if status.Authorized {
-			userID := int64(0)
-			if status.User != nil {
-				userID = status.User.ID
-			}
-			logger.Info("mtproto session already authorized", zap.Int64("user_id", userID))
-			return nil
-		}
-
-		if mt.Phone == "" {
-			return errors.New("telegram.mtproto.phone is required for first-time login")
-		}
-		if mt.AuthCode == "" {
-			return errors.New("telegram.mtproto.auth_code is required for first-time login")
-		}
-
-		logger.Info("performing mtproto login flow")
-		if authErr := ensureMTProtoAuth(runCtx, client, mt); authErr != nil {
-			return authErr
-		}
-
-		finalStatus, finalErr := client.Auth().Status(runCtx)
-		if finalErr != nil {
-			return fmt.Errorf("check final auth status: %w", finalErr)
-		}
-		if !finalStatus.Authorized {
-			return errors.New("mtproto login finished but account is still unauthorized")
-		}
-		userID := int64(0)
-		if finalStatus.User != nil {
-			userID = finalStatus.User.ID
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return err
 		}
 		logger.Info("mtproto session created successfully",
 			zap.String("session_file", mt.Session),
-			zap.Int64("user_id", userID),
+			zap.Int64("user_id", status.User.ID),
 		)
+
 		return nil
 	})
 }

@@ -11,8 +11,6 @@ import (
 	"time"
 
 	"github.com/fmotalleb/go-tools/log"
-	gotd "github.com/gotd/td/telegram"
-	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/peers"
 	"github.com/gotd/td/tg"
@@ -55,8 +53,12 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 	}
 
 	return client.Run(ctx, func(runCtx context.Context) error {
-		if err := ensureMTProtoAuth(runCtx, client, mt); err != nil {
-			return err
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("mtproto auth status: %w", err)
+		}
+		if !status.Authorized {
+			return errors.New("mtproto session not authorized")
 		}
 
 		peerMgr := (peers.Options{}).Build(tg.NewClient(client))
@@ -68,7 +70,7 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 		m.api = tg.NewClient(client)
 		m.peerMgr = peerMgr
 		m.dl = downloader.NewDownloader()
-		status, _ := client.Auth().Status(runCtx)
+		status, _ = client.Auth().Status(runCtx)
 		if status != nil && status.User != nil {
 			m.selfID = status.User.ID
 			logger.Debug("mtproto fallback authorized", zap.Int64("self_user_id", m.selfID))
@@ -84,10 +86,7 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 func (m *MTProtoFallback) IsSelfUser(userID int64) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if m.selfID != 0 && m.selfID == userID {
-		return true
-	}
-	return m.cfg.Telegram.MTProto.UserID != 0 && m.cfg.Telegram.MTProto.UserID == userID
+	return m.selfID != 0 && m.selfID == userID
 }
 
 func (m *MTProtoFallback) DownloadFromBotMessage(
@@ -352,33 +351,4 @@ func fileSizeSafe(path string) int64 {
 		return 0
 	}
 	return info.Size()
-}
-
-func ensureMTProtoAuth(ctx context.Context, client *gotd.Client, mt config.MTProtoConfig) error {
-	logger := log.Of(ctx)
-	status, err := client.Auth().Status(ctx)
-	if err != nil {
-		return fmt.Errorf("mtproto auth status: %w", err)
-	}
-	if status.Authorized {
-		logger.Debug("mtproto already authorized")
-		return nil
-	}
-
-	if mt.Phone == "" || mt.AuthCode == "" {
-		return errors.New("mtproto not authorized; set telegram.mtproto.phone and telegram.mtproto.auth_code for initial login")
-	}
-	flow := auth.NewFlow(auth.CodeOnly(mt.Phone, auth.CodeAuthenticatorFunc(func(context.Context, *tg.AuthSentCode) (string, error) {
-		return mt.AuthCode, nil
-	})), auth.SendCodeOptions{})
-	if mt.Password != "" {
-		flow = auth.NewFlow(auth.Constant(mt.Phone, mt.Password, auth.CodeAuthenticatorFunc(func(context.Context, *tg.AuthSentCode) (string, error) {
-			return mt.AuthCode, nil
-		})), auth.SendCodeOptions{})
-	}
-	if err = client.Auth().IfNecessary(ctx, flow); err != nil {
-		return fmt.Errorf("mtproto login: %w", err)
-	}
-	logger.Debug("mtproto login completed")
-	return nil
 }

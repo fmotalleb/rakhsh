@@ -44,24 +44,12 @@ See [config.yaml.example](config.yaml.example).
 Important for MTProto:
 - `telegram.mtproto.api_id` and `telegram.mtproto.api_hash` are required.
 - `telegram.mtproto.session_file` stores your user session.
-- If session is not authorized yet, set `phone` + one-time `auth_code` (and `password` if 2FA is enabled) for initial login.
 
 ### How to receive required MTProto info
 
 1. `api_id` and `api_hash`
 - Go to `https://my.telegram.org/apps`.
 - Create an app and copy `api_id` and `api_hash`.
-
-2. `phone`
-- Your Telegram account phone in international format (example: `+98912...`).
-
-3. `auth_code`
-- On first run without an existing authorized session, Telegram sends a login code to your Telegram app/device.
-- Put that code in `telegram.mtproto.auth_code` and run once.
-- After successful login and session creation, you can clear `auth_code`.
-
-4. `password` (optional)
-- Only if your Telegram account has 2FA enabled.
 
 5. `fallback_forward_chat_id` (for relay fallback)
 - Send `/ids` to your bot from the relay chat.
@@ -74,13 +62,16 @@ Important for MTProto:
 go run . -c config.yaml
 ```
 
-Create/verify MTProto session explicitly:
+Create/verify MTProto session explicitly (interactive mode):
 
 ```bash
-go run . mtproto-session -c config.yaml
+go run . mtproto-session
 ```
-
-This command logs each auth stage and exits with success/failure, which helps debug first-time login/session creation.
+or with flags:
+```bash
+go run . mtproto-session --session ./data/mtproto.session --api-id 12345 --api-hash "0123456789abcdef0123456789abcdef"
+```
+This command will prompt you for any missing `api-id`, `api-hash`, and phone number. It logs each auth stage and exits with success/failure, which helps debug first-time login/session creation.
 
 The bot/userbot replies with links like:
 

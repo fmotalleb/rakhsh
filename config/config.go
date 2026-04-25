@@ -33,13 +33,9 @@ type TelegramConfig struct {
 type MTProtoConfig struct {
 	FallbackEnabled       bool   `mapstructure:"fallback_enabled"`
 	FallbackForwardChatID int64  `mapstructure:"fallback_forward_chat_id"`
-	UserID                int64  `mapstructure:"user_id"`
 	APIID                 int    `mapstructure:"api_id"`
 	APIHash               string `mapstructure:"api_hash"`
 	Session               string `mapstructure:"session_file"`
-	Phone                 string `mapstructure:"phone"`
-	AuthCode              string `mapstructure:"auth_code"`
-	Password              string `mapstructure:"password"`
 	DeviceName            string `mapstructure:"device_name"`
 }
 

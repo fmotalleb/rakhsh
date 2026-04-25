@@ -53,8 +53,12 @@ func (b *MTProtoUserBot) Run(ctx context.Context) error {
 	}
 
 	return client.Run(ctx, func(runCtx context.Context) error {
-		if err := ensureMTProtoAuth(runCtx, client, mt); err != nil {
-			return err
+		status, err := client.Auth().Status(runCtx)
+		if err != nil {
+			return fmt.Errorf("mtproto auth status: %w", err)
+		}
+		if !status.Authorized {
+			return errors.New("mtproto session not authorized")
 		}
 		logger.Debug("mtproto userbot authorized")
 
