@@ -20,6 +20,7 @@ import (
 
 	"github.com/fmotalleb/rakhsh/config"
 	"github.com/fmotalleb/rakhsh/internal/downloader"
+	"github.com/fmotalleb/rakhsh/internal/helper"
 	"github.com/fmotalleb/rakhsh/internal/storage"
 )
 
@@ -705,24 +706,10 @@ func (u *statusUpdater) Update(text string) error {
 	return nil
 }
 
-
 func formatMTProtoProgress(downloaded int64, total int64) string {
 	if total > 0 {
 		percent := float64(downloaded) * 100 / float64(total)
-		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)", humanBytes(downloaded), humanBytes(total), percent)
+		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)", helper.HumanBytes(downloaded), helper.HumanBytes(total), percent)
 	}
-	return "MTProto downloading... " + humanBytes(downloaded)
-}
-
-func humanBytes(size int64) string {
-	if size < 1024 {
-		return fmt.Sprintf("%d B", size)
-	}
-	const unit = 1024
-	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(size)/float64(div), "KMGTPE"[exp])
+	return "MTProto downloading... " + helper.HumanBytes(downloaded)
 }

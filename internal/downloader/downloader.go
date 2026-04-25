@@ -14,6 +14,8 @@ import (
 
 	toollog "github.com/fmotalleb/go-tools/log"
 	"go.uber.org/zap"
+
+	"github.com/fmotalleb/rakhsh/internal/helper"
 )
 
 type Downloader struct {
@@ -27,11 +29,16 @@ type Progress struct {
 	Downloaded int64
 	Total      int64
 	Attempt    uint
+
+	CurrentSpeed float64 // bytes/sec
+	AvgSpeed     float64 // bytes/sec
+	Elapsed      time.Duration
+	ETA          time.Duration
 }
 
 func (p Progress) String() string {
-	speed := humanBytes(int64(p.CurrentSpeed)) + "/s"
-	avg := humanBytes(int64(p.AvgSpeed)) + "/s"
+	speed := helper.HumanBytes(int64(p.CurrentSpeed)) + "/s"
+	avg := helper.HumanBytes(int64(p.AvgSpeed)) + "/s"
 
 	if p.Total > 0 {
 		percent := float64(p.Downloaded) * 100 / float64(p.Total)
@@ -42,8 +49,8 @@ func (p Progress) String() string {
 			eta=%s
 			attempt=%d
 			`,
-			humanBytes(p.Downloaded),
-			humanBytes(p.Total),
+			helper.HumanBytes(p.Downloaded),
+			helper.HumanBytes(p.Total),
 			percent,
 			speed,
 			avg,
@@ -55,7 +62,7 @@ func (p Progress) String() string {
 
 	return fmt.Sprintf(
 		"%s speed=%s avg=%s elapsed=%s [attempt %d]",
-		humanBytes(p.Downloaded),
+		helper.HumanBytes(p.Downloaded),
 		speed,
 		avg,
 		p.Elapsed.Truncate(time.Second),
@@ -247,15 +254,16 @@ func responseTotalSize(resp *http.Response, offset int64) int64 {
 	}
 	return length
 }
+
 type progressReader struct {
 	reader     io.Reader
 	downloaded int64
 	total      int64
 	attempt    uint
 
-	startTime  time.Time
-	lastEmit   time.Time
-	lastBytes  int64
+	startTime time.Time
+	lastEmit  time.Time
+	lastBytes int64
 
 	interval   time.Duration
 	progressCb ProgressFunc
