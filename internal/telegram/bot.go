@@ -122,19 +122,20 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				message.Chat.ID,
 				message.MessageID,
 			)
-			if forwardErr != nil {
+			if forwardErr != nil || forwardedMessage.MessageID == 0 {
 				logger.Warn("fallback forward failed, trying to send document", zap.Error(forwardErr))
 				sentMessage, sendErr := api.SendDocument(ctx, h.cfg.Telegram.MTProto.FallbackForwardChatID, fileID)
-				if sendErr != nil {
-					logger.Warn("fallback send document failed, trying original message for mtproto fallback", zap.Error(sendErr))
-				} else {
-					fallbackChatID = sentMessage.Chat.ID
-					fallbackMessageID = sentMessage.MessageID
-					logger.Debug("fallback send document succeeded",
-						zap.Int64("sent_chat_id", fallbackChatID),
-						zap.Int64("sent_message_id", fallbackMessageID),
-					)
+				if sendErr != nil || sentMessage.MessageID == 0 {
+					logger.Warn("fallback send document failed, giving up", zap.Error(sendErr))
+					_ = statusUpdater.Update("Failed to relay message for MTProto fallback.")
+					return
 				}
+				fallbackChatID = sentMessage.Chat.ID
+				fallbackMessageID = sentMessage.MessageID
+				logger.Debug("fallback send document succeeded",
+					zap.Int64("sent_chat_id", fallbackChatID),
+					zap.Int64("sent_message_id", fallbackMessageID),
+				)
 			} else {
 				fallbackChatID = forwardedMessage.Chat.ID
 				fallbackMessageID = forwardedMessage.MessageID

@@ -44,3 +44,4 @@ dist/
 /data/
 
 /config.yaml
+__debug*
