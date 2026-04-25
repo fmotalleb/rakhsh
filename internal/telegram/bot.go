@@ -102,58 +102,45 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		}
 		fallbackChatID := message.Chat.ID
 		fallbackMessageID := message.MessageID
-		shouldForward := h.cfg.Telegram.MTProto.FallbackForwardChatID != 0
-		if shouldForward && h.cfg.Telegram.MTProto.FallbackForwardChatID == message.Chat.ID {
-			shouldForward = false
-		}
-		if shouldForward && message.From != nil && h.fallback.IsSelfUser(message.From.ID) {
-			shouldForward = false
-		}
+
 		wasRelayed := false
-		if shouldForward {
-			_ = statusUpdater.Update("Switching to MTProto fallback (relay)...")
-			logger.Debug("mtproto fallback selected with relay forwarding",
-				zap.Int64("from_chat_id", message.Chat.ID),
-				zap.Int64("from_message_id", message.MessageID),
-				zap.Int64("fallback_forward_chat_id", h.cfg.Telegram.MTProto.FallbackForwardChatID),
-			)
-			forwardedMessage, forwardErr := api.ForwardMessage(
-				ctx,
-				h.cfg.Telegram.MTProto.FallbackForwardChatID,
-				message.Chat.ID,
-				message.MessageID,
-			)
-			if forwardErr != nil || forwardedMessage.MessageID == 0 {
-				logger.Warn("fallback forward failed, trying to send document", zap.Error(forwardErr))
-				sentMessage, sendErr := api.SendDocument(ctx, h.cfg.Telegram.MTProto.FallbackForwardChatID, fileID)
-				if sendErr != nil || sentMessage.MessageID == 0 {
-					logger.Warn("fallback send document failed, giving up", zap.Error(sendErr))
-					_ = statusUpdater.Update("Failed to relay message for MTProto fallback.")
-					return
-				}
-				fallbackChatID = sentMessage.Chat.ID
-				fallbackMessageID = sentMessage.MessageID
-				wasRelayed = true
-				logger.Debug("fallback send document succeeded",
-					zap.Int64("sent_chat_id", fallbackChatID),
-					zap.Int64("sent_message_id", fallbackMessageID),
-				)
-			} else {
-				fallbackChatID = forwardedMessage.Chat.ID
-				fallbackMessageID = forwardedMessage.MessageID
-				wasRelayed = true
-				logger.Debug("fallback forward succeeded",
-					zap.Int64("forwarded_chat_id", fallbackChatID),
-					zap.Int64("forwarded_message_id", fallbackMessageID),
-				)
+		_ = statusUpdater.Update("Switching to MTProto fallback (relay)...")
+		logger.Debug("mtproto fallback selected with relay forwarding",
+			zap.Int64("from_chat_id", message.Chat.ID),
+			zap.Int64("from_message_id", message.MessageID),
+			zap.Int64("fallback_forward_chat_id", h.cfg.Telegram.MTProto.FallbackForwardChatID),
+		)
+		forwardedMessage, forwardErr := api.ForwardMessage(
+			ctx,
+			h.cfg.Telegram.MTProto.FallbackForwardChatID,
+			message.Chat.ID,
+			message.MessageID,
+		)
+		if forwardErr != nil || forwardedMessage.MessageID == 0 {
+			logger.Warn("fallback forward failed, trying to send document", zap.Error(forwardErr))
+			sentMessage, sendErr := api.SendDocument(ctx, h.cfg.Telegram.MTProto.FallbackForwardChatID, fileID)
+			if sendErr != nil || sentMessage.MessageID == 0 {
+				logger.Warn("fallback send document failed, giving up", zap.Error(sendErr))
+				_ = statusUpdater.Update("Failed to relay message for MTProto fallback.")
+				return
 			}
-		} else {
-			logger.Debug("mtproto fallback selected without forwarding",
-				zap.Int64("chat_id", message.Chat.ID),
-				zap.Int64("message_id", message.MessageID),
+			fallbackChatID = sentMessage.Chat.ID
+			fallbackMessageID = sentMessage.MessageID
+			wasRelayed = true
+			logger.Debug("fallback send document succeeded",
+				zap.Int64("sent_chat_id", fallbackChatID),
+				zap.Int64("sent_message_id", fallbackMessageID),
 			)
-			_ = statusUpdater.Update("Switching to MTProto fallback...")
+		} else {
+			fallbackChatID = forwardedMessage.Chat.ID
+			fallbackMessageID = forwardedMessage.MessageID
+			wasRelayed = true
+			logger.Debug("fallback forward succeeded",
+				zap.Int64("forwarded_chat_id", fallbackChatID),
+				zap.Int64("forwarded_message_id", fallbackMessageID),
+			)
 		}
+
 		_ = statusUpdater.Update("MTProto download started...")
 		if err = h.fallback.DownloadFromBotMessage(
 			ctx,
