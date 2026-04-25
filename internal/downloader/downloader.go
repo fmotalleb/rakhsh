@@ -44,11 +44,10 @@ func (p Progress) String() string {
 		percent := float64(p.Downloaded) * 100 / float64(p.Total)
 		return fmt.Sprintf(
 			`%s / %s (%.1f%%)
-			speed: %s, avg=%s
-			elapsed=%s
-			eta=%s
-			attempt=%d
-			`,
+speed: %s, avg=%s
+elapsed=%s
+eta=%s
+attempt=%d`,
 			helper.HumanBytes(p.Downloaded),
 			helper.HumanBytes(p.Total),
 			percent,
