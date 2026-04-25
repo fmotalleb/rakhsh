@@ -109,6 +109,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		if shouldForward && message.From != nil && h.fallback.IsSelfUser(message.From.ID) {
 			shouldForward = false
 		}
+		wasRelayed := false
 		if shouldForward {
 			_ = statusUpdater.Update("Switching to MTProto fallback (relay)...")
 			logger.Debug("mtproto fallback selected with relay forwarding",
@@ -132,6 +133,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				}
 				fallbackChatID = sentMessage.Chat.ID
 				fallbackMessageID = sentMessage.MessageID
+				wasRelayed = true
 				logger.Debug("fallback send document succeeded",
 					zap.Int64("sent_chat_id", fallbackChatID),
 					zap.Int64("sent_message_id", fallbackMessageID),
@@ -139,6 +141,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			} else {
 				fallbackChatID = forwardedMessage.Chat.ID
 				fallbackMessageID = forwardedMessage.MessageID
+				wasRelayed = true
 				logger.Debug("fallback forward succeeded",
 					zap.Int64("forwarded_chat_id", fallbackChatID),
 					zap.Int64("forwarded_message_id", fallbackMessageID),
@@ -158,9 +161,16 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			fallbackMessageID,
 			tempPath,
 			h.cfg.Telegram.UpdateInterval,
-			func(downloaded int64, total int64) {
-				logger.Debug("mtproto progress", zap.Int64("downloaded", downloaded), zap.Int64("total", total))
-				_ = statusUpdater.Update(formatMTProtoProgress(downloaded, total))
+			func(p Progress) {
+				logger.Debug("mtproto progress",
+					zap.Int64("downloaded", p.Downloaded),
+					zap.Int64("total", p.Total),
+					zap.Float64("current_speed", p.CurrentSpeed),
+					zap.Float64("avg_speed", p.AvgSpeed),
+					zap.Duration("elapsed", p.Elapsed),
+					zap.Duration("eta", p.ETA),
+				)
+				_ = statusUpdater.Update(formatMTProtoProgress(p))
 			},
 		); err != nil {
 			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
@@ -172,6 +182,11 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				zap.Int64("fallback_message_id", fallbackMessageID),
 			)
 			return
+		}
+		if wasRelayed {
+			if deleteErr := api.DeleteMessage(ctx, fallbackChatID, fallbackMessageID); deleteErr != nil {
+				logger.Warn("failed to delete forwarded message", zap.Error(deleteErr))
+			}
 		}
 	} else {
 		if err = h.dl.DownloadWithProgress(
@@ -589,6 +604,39 @@ func (a *API) SendDocument(ctx context.Context, chatID int64, fileID string) (Me
 	return payload.Result, nil
 }
 
+func (a *API) DeleteMessage(ctx context.Context, chatID int64, messageID int64) error {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "deleteMessage"),
+		zap.Int64("chat_id", chatID),
+		zap.Int64("message_id", messageID),
+	)
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(chatID, 10))
+	values.Set("message_id", strconv.FormatInt(messageID, 10))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("deleteMessage"), strings.NewReader(values.Encode()))
+	if err != nil {
+		return fmt.Errorf("create deleteMessage request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "deleteMessage"), zap.Int("status_code", resp.StatusCode))
+
+	var payload apiResponse[json.RawMessage]
+	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.OK {
+		return fmt.Errorf("deleteMessage failed: %s", payload.Description)
+	}
+	return nil
+}
+
 func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
 	log.Of(ctx).Debug("telegram api request",
 		zap.String("method", "editMessageText"),
@@ -751,10 +799,18 @@ func (u *statusUpdater) Update(text string) error {
 	return nil
 }
 
-func formatMTProtoProgress(downloaded int64, total int64) string {
-	if total > 0 {
-		percent := float64(downloaded) * 100 / float64(total)
-		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)", helper.HumanBytes(downloaded), helper.HumanBytes(total), percent)
+func formatMTProtoProgress(p Progress) string {
+	if p.Total > 0 {
+		percent := float64(p.Downloaded) * 100 / float64(p.Total)
+		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%) %s/s",
+			helper.HumanBytes(p.Downloaded),
+			helper.HumanBytes(p.Total),
+			percent,
+			helper.HumanBytes(int64(p.CurrentSpeed)),
+		)
 	}
-	return "MTProto downloading... " + helper.HumanBytes(downloaded)
+	return fmt.Sprintf("MTProto downloading... %s %s/s",
+		helper.HumanBytes(p.Downloaded),
+		helper.HumanBytes(int64(p.CurrentSpeed)),
+	)
 }

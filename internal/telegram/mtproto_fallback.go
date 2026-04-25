@@ -95,7 +95,7 @@ func (m *MTProtoFallback) DownloadFromBotMessage(
 	botMessageID int64,
 	destination string,
 	progressInterval time.Duration,
-	progressCb func(downloaded int64, total int64),
+	progressCb func(p Progress),
 ) error {
 	logger := log.Of(ctx)
 	logger.Debug("mtproto fallback download requested",
@@ -147,13 +147,31 @@ func (m *MTProtoFallback) DownloadFromBotMessage(
 		}
 		ticker := time.NewTicker(progressInterval)
 		defer ticker.Stop()
+
+		startTime := time.Now()
+		lastEmit := time.Now()
+		lastBytes := int64(0)
+
 		for {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case downloadErr := <-errChan:
 				size := fileSizeSafe(destination)
-				progressCb(size, totalSize)
+				elapsed := time.Since(startTime)
+				var avgSpeed float64
+				if elapsed > 0 {
+					avgSpeed = float64(size) / elapsed.Seconds()
+				}
+				progressCb(Progress{
+					Downloaded:   size,
+					Total:        totalSize,
+					CurrentSpeed: avgSpeed,
+					AvgSpeed:     avgSpeed,
+					Elapsed:      elapsed,
+					ETA:          0,
+				})
+
 				if downloadErr != nil {
 					return fmt.Errorf("mtproto fallback download: %w", downloadErr)
 				}
@@ -161,8 +179,38 @@ func (m *MTProtoFallback) DownloadFromBotMessage(
 				return nil
 			case <-ticker.C:
 				size := fileSizeSafe(destination)
-				progressCb(size, totalSize)
-				logger.Debug("mtproto fallback progress", zap.Int64("downloaded", size), zap.Int64("total", totalSize))
+				now := time.Now()
+				elapsed := now.Sub(startTime)
+				bytesDelta := size - lastBytes
+				timeDelta := now.Sub(lastEmit)
+
+				var currentSpeed float64
+				if timeDelta > 0 {
+					currentSpeed = float64(bytesDelta) / timeDelta.Seconds()
+				}
+
+				var avgSpeed float64
+				if elapsed > 0 {
+					avgSpeed = float64(size) / elapsed.Seconds()
+				}
+
+				var eta time.Duration = -1
+				if totalSize > 0 && avgSpeed > 0 {
+					remaining := float64(totalSize - size)
+					eta = time.Duration(remaining/avgSpeed) * time.Second
+				}
+
+				progressCb(Progress{
+					Downloaded:   size,
+					Total:        totalSize,
+					CurrentSpeed: currentSpeed,
+					AvgSpeed:     avgSpeed,
+					Elapsed:      elapsed,
+					ETA:          eta,
+				})
+
+				lastEmit = now
+				lastBytes = size
 			}
 		}
 	}
