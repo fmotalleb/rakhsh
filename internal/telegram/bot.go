@@ -172,7 +172,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 					zap.Int64("total", progress.Total),
 					zap.Uint("attempt", progress.Attempt),
 				)
-				_ = statusUpdater.Update(formatProgress(progress))
+				_ = statusUpdater.Update(progress.String())
 			},
 		); err != nil {
 			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
@@ -705,19 +705,6 @@ func (u *statusUpdater) Update(text string) error {
 	return nil
 }
 
-func formatProgress(progress downloader.Progress) string {
-	if progress.Total > 0 {
-		percent := float64(progress.Downloaded) * 100 / float64(progress.Total)
-		return fmt.Sprintf(
-			"Downloading... %s / %s (%.1f%%) [attempt %d]",
-			humanBytes(progress.Downloaded),
-			humanBytes(progress.Total),
-			percent,
-			progress.Attempt,
-		)
-	}
-	return fmt.Sprintf("Downloading... %s [attempt %d]", humanBytes(progress.Downloaded), progress.Attempt)
-}
 
 func formatMTProtoProgress(downloaded int64, total int64) string {
 	if total > 0 {

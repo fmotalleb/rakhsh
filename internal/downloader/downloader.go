@@ -29,6 +29,40 @@ type Progress struct {
 	Attempt    uint
 }
 
+func (p Progress) String() string {
+	speed := humanBytes(int64(p.CurrentSpeed)) + "/s"
+	avg := humanBytes(int64(p.AvgSpeed)) + "/s"
+
+	if p.Total > 0 {
+		percent := float64(p.Downloaded) * 100 / float64(p.Total)
+		return fmt.Sprintf(
+			`%s / %s (%.1f%%)
+			speed: %s, avg=%s
+			elapsed=%s
+			eta=%s
+			attempt=%d
+			`,
+			humanBytes(p.Downloaded),
+			humanBytes(p.Total),
+			percent,
+			speed,
+			avg,
+			p.Elapsed.Truncate(time.Second),
+			p.ETA.Truncate(time.Second),
+			p.Attempt,
+		)
+	}
+
+	return fmt.Sprintf(
+		"%s speed=%s avg=%s elapsed=%s [attempt %d]",
+		humanBytes(p.Downloaded),
+		speed,
+		avg,
+		p.Elapsed.Truncate(time.Second),
+		p.Attempt,
+	)
+}
+
 type ProgressFunc func(Progress)
 
 func New(client *http.Client, maxRetries uint, retryDelay time.Duration, maxFileSize uint64) *Downloader {
@@ -163,7 +197,9 @@ func (d *Downloader) downloadOnce(
 			downloaded: offset,
 			total:      totalSize,
 			attempt:    attempt,
+			startTime:  time.Now(),
 			lastEmit:   time.Now(),
+			lastBytes:  offset,
 			interval:   interval,
 			progressCb: progressCb,
 		}
@@ -211,13 +247,16 @@ func responseTotalSize(resp *http.Response, offset int64) int64 {
 	}
 	return length
 }
-
 type progressReader struct {
 	reader     io.Reader
 	downloaded int64
 	total      int64
 	attempt    uint
+
+	startTime  time.Time
 	lastEmit   time.Time
+	lastBytes  int64
+
 	interval   time.Duration
 	progressCb ProgressFunc
 }
@@ -227,22 +266,62 @@ func (r *progressReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.downloaded += int64(n)
 		now := time.Now()
+
 		if now.Sub(r.lastEmit) >= r.interval {
+			elapsed := now.Sub(r.startTime)
+			bytesDelta := r.downloaded - r.lastBytes
+			timeDelta := now.Sub(r.lastEmit)
+
+			var currentSpeed float64
+			if timeDelta > 0 {
+				currentSpeed = float64(bytesDelta) / timeDelta.Seconds()
+			}
+
+			var avgSpeed float64
+			if elapsed > 0 {
+				avgSpeed = float64(r.downloaded) / elapsed.Seconds()
+			}
+
+			var eta time.Duration = -1
+			if r.total > 0 && avgSpeed > 0 {
+				remaining := float64(r.total - r.downloaded)
+				eta = time.Duration(remaining/avgSpeed) * time.Second
+			}
+
 			r.progressCb(Progress{
-				Downloaded: r.downloaded,
-				Total:      r.total,
-				Attempt:    r.attempt,
+				Downloaded:   r.downloaded,
+				Total:        r.total,
+				Attempt:      r.attempt,
+				CurrentSpeed: currentSpeed,
+				AvgSpeed:     avgSpeed,
+				Elapsed:      elapsed,
+				ETA:          eta,
 			})
+
 			r.lastEmit = now
+			r.lastBytes = r.downloaded
 		}
 	}
+
 	if err == io.EOF {
+		elapsed := time.Since(r.startTime)
+
+		var avgSpeed float64
+		if elapsed > 0 {
+			avgSpeed = float64(r.downloaded) / elapsed.Seconds()
+		}
+
 		r.progressCb(Progress{
-			Downloaded: r.downloaded,
-			Total:      r.total,
-			Attempt:    r.attempt,
+			Downloaded:   r.downloaded,
+			Total:        r.total,
+			Attempt:      r.attempt,
+			CurrentSpeed: avgSpeed,
+			AvgSpeed:     avgSpeed,
+			Elapsed:      elapsed,
+			ETA:          0,
 		})
 	}
+
 	return n, err
 }
 
