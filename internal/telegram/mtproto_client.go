@@ -13,7 +13,7 @@ import (
 	"github.com/fmotalleb/rakhsh/internal/netx"
 )
 
-func newMTProtoClient(cfg config.Config, logger *zap.Logger, updateHandler gotd.UpdateHandler) (*gotd.Client, error) {
+func newMTProtoClient(cfg *config.Config, logger *zap.Logger, updateHandler gotd.UpdateHandler) (*gotd.Client, error) {
 	mt := cfg.Telegram.MTProto
 	if err := os.MkdirAll(filepath.Dir(mt.Session), 0o750); err != nil {
 		return nil, err

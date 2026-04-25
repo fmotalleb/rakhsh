@@ -16,10 +16,10 @@ import (
 	"github.com/fmotalleb/rakhsh/config"
 )
 
-func InteractiveMTProtoSession(ctx context.Context, cfg config.Config) error {
+func InteractiveMTProtoSession(ctx context.Context, cfg *config.Config, configPath string) error {
 	logger := log.Of(ctx)
 	cfg.ApplyDefaults()
-	mt := cfg.Telegram.MTProto
+	mt := &cfg.Telegram.MTProto
 
 	if mt.APIID == 0 {
 		fmt.Print("Enter API ID: ")
@@ -40,6 +40,12 @@ func InteractiveMTProtoSession(ctx context.Context, cfg config.Config) error {
 			return err
 		}
 		mt.APIHash = strings.TrimSpace(apiHash)
+	}
+
+	if configPath != "" {
+		if err := config.Write(cfg, configPath); err != nil {
+			logger.Warn("failed to write config", zap.Error(err))
+		}
 	}
 
 	logger.Info("starting mtproto session creation",

@@ -47,7 +47,7 @@ func (m *MTProtoFallback) Run(ctx context.Context) error {
 		zap.String("session_file", mt.Session),
 		zap.String("socks5_addr", m.cfg.Proxy.SOCKS5Addr),
 	)
-	client, err := newMTProtoClient(m.cfg, logger, nil)
+	client, err := newMTProtoClient(&m.cfg, logger, nil)
 	if err != nil {
 		return fmt.Errorf("init mtproto client: %w", err)
 	}

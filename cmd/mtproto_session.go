@@ -17,6 +17,10 @@ var mtprotoSessionCmd = &cobra.Command{
 	Use:   "mtproto-session",
 	Short: "Create or verify MTProto user session file",
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		configFile, err := cmd.Flags().GetString("config")
+		if err != nil {
+			return err
+		}
 		sessionFile, err := cmd.Flags().GetString("session")
 		if err != nil {
 			return err
@@ -33,6 +37,7 @@ var mtprotoSessionCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 
@@ -41,20 +46,27 @@ var mtprotoSessionCmd = &cobra.Command{
 			return err
 		}
 
-		cfg := config.Config{
-			Telegram: config.TelegramConfig{
-				MTProto: config.MTProtoConfig{
-					Session: sessionFile,
-					APIID:   apiID,
-					APIHash: apiHash,
-				},
-			},
-			Proxy: config.ProxyConfig{
-				SOCKS5Addr: socks5,
-			},
+		var cfg config.Config
+		if configFile != "" {
+			if err = config.Parse(ctx, &cfg, configFile); err != nil {
+				return err
+			}
 		}
 
-		return telegram.InteractiveMTProtoSession(ctx, cfg)
+		if sessionFile != "" {
+			cfg.Telegram.MTProto.Session = sessionFile
+		}
+		if apiID != 0 {
+			cfg.Telegram.MTProto.APIID = apiID
+		}
+		if apiHash != "" {
+			cfg.Telegram.MTProto.APIHash = apiHash
+		}
+		if socks5 != "" {
+			cfg.Proxy.SOCKS5Addr = socks5
+		}
+
+		return telegram.InteractiveMTProtoSession(ctx, &cfg, configFile)
 	},
 }
 

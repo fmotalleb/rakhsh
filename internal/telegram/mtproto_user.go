@@ -47,7 +47,7 @@ func (b *MTProtoUserBot) Run(ctx context.Context) error {
 		zap.String("socks5_addr", b.cfg.Proxy.SOCKS5Addr),
 	)
 	dispatcher := tg.NewUpdateDispatcher()
-	client, err := newMTProtoClient(b.cfg, logger, dispatcher)
+	client, err := newMTProtoClient(&b.cfg, logger, dispatcher)
 	if err != nil {
 		return fmt.Errorf("init mtproto client: %w", err)
 	}
