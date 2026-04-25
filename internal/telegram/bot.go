@@ -789,15 +789,18 @@ func (u *statusUpdater) Update(text string) error {
 func formatMTProtoProgress(p Progress) string {
 	if p.Total > 0 {
 		percent := float64(p.Downloaded) * 100 / float64(p.Total)
-		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%) %s/s",
+		return fmt.Sprintf("MTProto downloading... %s / %s (%.1f%%)\nSpeed: %s/s, Elapsed: %s, ETA: %s",
 			helper.HumanBytes(p.Downloaded),
 			helper.HumanBytes(p.Total),
 			percent,
 			helper.HumanBytes(int64(p.CurrentSpeed)),
+			p.Elapsed.Truncate(time.Second),
+			p.ETA.Truncate(time.Second),
 		)
 	}
-	return fmt.Sprintf("MTProto downloading... %s %s/s",
+	return fmt.Sprintf("MTProto downloading... %s %s/s, Elapsed: %s",
 		helper.HumanBytes(p.Downloaded),
 		helper.HumanBytes(int64(p.CurrentSpeed)),
+		p.Elapsed.Truncate(time.Second),
 	)
 }
