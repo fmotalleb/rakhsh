@@ -78,7 +78,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID)
 	_ = statusUpdater.Update("Preparing download...")
 
-	fileName, sourceURL, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
+	fileName, sourceURL, fileID, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
 	if err != nil {
 		_ = statusUpdater.Update("Please send a direct URL or attach a document")
 		logger.Debug("message ignored", zap.Error(err))
@@ -123,7 +123,18 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				message.MessageID,
 			)
 			if forwardErr != nil {
-				logger.Warn("fallback forward failed, trying original message for mtproto fallback", zap.Error(forwardErr))
+				logger.Warn("fallback forward failed, trying to send document", zap.Error(forwardErr))
+				sentMessage, sendErr := api.SendDocument(ctx, h.cfg.Telegram.MTProto.FallbackForwardChatID, fileID)
+				if sendErr != nil {
+					logger.Warn("fallback send document failed, trying original message for mtproto fallback", zap.Error(sendErr))
+				} else {
+					fallbackChatID = sentMessage.Chat.ID
+					fallbackMessageID = sentMessage.MessageID
+					logger.Debug("fallback send document succeeded",
+						zap.Int64("sent_chat_id", fallbackChatID),
+						zap.Int64("sent_message_id", fallbackMessageID),
+					)
+				}
 			} else {
 				fallbackChatID = forwardedMessage.Chat.ID
 				fallbackMessageID = forwardedMessage.MessageID
@@ -198,7 +209,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	_ = statusUpdater.Update("File ready: " + publicURL)
 }
 
-func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, bool, error) {
+func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, string, bool, error) {
 	logger := log.Of(ctx)
 	if message.Document != nil {
 		name := message.Document.FileName
@@ -210,9 +221,9 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		if err != nil {
 			logger.Debug("bot getFile failed for document, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return name, "", true, nil
+				return name, "", message.Document.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		if name == "" {
 			name = filepath.Base(file.FilePath)
@@ -220,7 +231,7 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		if name == "" {
 			name = telegramFileBin
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), message.Document.FileID, false, nil
 	}
 	if message.Video != nil {
 		name := message.Video.FileName
@@ -231,14 +242,14 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		if err != nil {
 			logger.Debug("bot getFile failed for video, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return name, "", true, nil
+				return name, "", message.Video.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		if name == "" {
 			name = fallbackNameFromPath(file.FilePath, "telegram-video.mp4")
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), message.Video.FileID, false, nil
 	}
 	if message.Audio != nil {
 		name := message.Audio.FileName
@@ -249,38 +260,38 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		if err != nil {
 			logger.Debug("bot getFile failed for audio, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return name, "", true, nil
+				return name, "", message.Audio.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		if name == "" {
 			name = fallbackNameFromPath(file.FilePath, "telegram-audio.mp3")
 		}
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), message.Audio.FileID, false, nil
 	}
 	if message.Voice != nil {
 		file, err := api.GetFile(ctx, message.Voice.FileID)
 		if err != nil {
 			logger.Debug("bot getFile failed for voice, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return "telegram-voice.ogg", "", true, nil
+				return "telegram-voice.ogg", "", message.Voice.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-voice.ogg")
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), message.Voice.FileID, false, nil
 	}
 	if message.VideoNote != nil {
 		file, err := api.GetFile(ctx, message.VideoNote.FileID)
 		if err != nil {
 			logger.Debug("bot getFile failed for video note, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return "telegram-video-note.mp4", "", true, nil
+				return "telegram-video-note.mp4", "", message.VideoNote.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-video-note.mp4")
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), message.VideoNote.FileID, false, nil
 	}
 	if len(message.Photo) > 0 {
 		photo := pickLargestPhoto(message.Photo)
@@ -288,23 +299,23 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		if err != nil {
 			logger.Debug("bot getFile failed for photo, considering fallback", zap.Error(err))
 			if h.fallback != nil {
-				return "telegram-photo.jpg", "", true, nil
+				return "telegram-photo.jpg", "", photo.FileID, true, nil
 			}
-			return "", "", false, err
+			return "", "", "", false, err
 		}
 		name := fallbackNameFromPath(file.FilePath, "telegram-photo.jpg")
-		return name, api.BuildFileDownloadURL(file.FilePath), false, nil
+		return name, api.BuildFileDownloadURL(file.FilePath), photo.FileID, false, nil
 	}
 
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
-		return "", "", false, errors.New("empty message")
+		return "", "", "", false, errors.New("empty message")
 	}
 	match := urlRegex.FindString(text)
 	if match == "" {
-		return "", "", false, errors.New("no url in message")
+		return "", "", "", false, errors.New("no url in message")
 	}
-	return downloader.ParseFilenameFromURL(match), match, false, nil
+	return downloader.ParseFilenameFromURL(match), match, "", false, nil
 }
 
 type Bot struct {
@@ -540,6 +551,39 @@ func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int
 	}
 	if !payload.OK {
 		return Message{}, fmt.Errorf("forwardMessage failed: %s", payload.Description)
+	}
+	return payload.Result, nil
+}
+
+func (a *API) SendDocument(ctx context.Context, chatID int64, fileID string) (Message, error) {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "sendDocument"),
+		zap.Int64("chat_id", chatID),
+		zap.String("file_id", fileID),
+	)
+	values := url.Values{}
+	values.Set("chat_id", strconv.FormatInt(chatID, 10))
+	values.Set("document", fileID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("sendDocument"), strings.NewReader(values.Encode()))
+	if err != nil {
+		return Message{}, fmt.Errorf("create sendDocument request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return Message{}, err
+	}
+	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "sendDocument"), zap.Int("status_code", resp.StatusCode))
+
+	var payload apiResponse[Message]
+	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return Message{}, err
+	}
+	if !payload.OK {
+		return Message{}, fmt.Errorf("sendDocument failed: %s", payload.Description)
 	}
 	return payload.Result, nil
 }
