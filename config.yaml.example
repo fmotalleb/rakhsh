@@ -21,7 +21,7 @@ telegram:
     fallback_forward_chat_id: 0 # optional relay: bot forwards message here first, then mtproto downloads from that forwarded message
     api_id: 0
     api_hash: ""
-    session_file: ./data/mtproto.session
+    session_file: ./secrets/mtproto.session
     device_name: rakhsh
 
 proxy:

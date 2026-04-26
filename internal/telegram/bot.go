@@ -55,13 +55,6 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		zap.Bool("has_video_note", message.VideoNote != nil),
 		zap.Int("photo_sizes", len(message.Photo)),
 	)
-	if message.From != nil && len(h.allowedIDs) > 0 {
-		if _, ok := h.allowedIDs[message.From.ID]; !ok {
-			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
-			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
-			return
-		}
-	}
 
 	text := strings.TrimSpace(message.Text)
 	if text == "/ids" || text == "/whoami" {
@@ -72,6 +65,14 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
 		_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID)
 		return
+	}
+
+	if message.From != nil && len(h.allowedIDs) > 0 {
+		if _, ok := h.allowedIDs[message.From.ID]; !ok {
+			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
+			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
+			return
+		}
 	}
 
 	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID)

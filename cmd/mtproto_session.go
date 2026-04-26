@@ -72,7 +72,7 @@ var mtprotoSessionCmd = &cobra.Command{
 }
 
 func init() {
-	mtprotoSessionCmd.Flags().StringP("session", "s", "./data/mtproto.session", "Session file path")
+	mtprotoSessionCmd.Flags().StringP("session", "s", "./secrets/mtproto.session", "Session file path")
 	mtprotoSessionCmd.Flags().Int("api-id", 0, "API ID")
 	mtprotoSessionCmd.Flags().String("api-hash", "", "API Hash")
 	mtprotoSessionCmd.Flags().String("socks5", "", "SOCKS5 proxy address")

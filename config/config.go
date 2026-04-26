@@ -68,7 +68,7 @@ func (c *Config) ApplyDefaults() {
 		c.Telegram.UpdateInterval = 2 * time.Second
 	}
 	if c.Telegram.MTProto.Session == "" {
-		c.Telegram.MTProto.Session = filepath.Clean("./data/mtproto.session")
+		c.Telegram.MTProto.Session = filepath.Clean("./secrets/mtproto.session")
 	}
 	if c.Telegram.MTProto.DeviceName == "" {
 		c.Telegram.MTProto.DeviceName = "rakhsh"
