@@ -42,6 +42,7 @@ dist/
 /rakhsh
 
 /data/
+/secrets/
 
 /config.yaml
 __debug*
