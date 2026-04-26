@@ -58,21 +58,13 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 
 	text := strings.TrimSpace(message.Text)
 	if text == "/ids" || text == "/whoami" {
-		fromID := int64(0)
-		if message.From != nil {
-			fromID = message.From.ID
-		}
-		body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
-		_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID)
+		printIDs(ctx, message, api)
 		return
 	}
 
-	if message.From != nil && len(h.allowedIDs) > 0 {
-		if _, ok := h.allowedIDs[message.From.ID]; !ok {
-			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
-			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
-			return
-		}
+	hasAccess := checkAccess(ctx, message, h, logger, api)
+	if hasAccess {
+		return
 	}
 
 	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID)
@@ -210,105 +202,56 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		zap.String("md5", md5Hex),
 		zap.String("public_url", publicURL),
 	)
-	_ = statusUpdater.Update("File ready: " + publicURL)
+	err = api.DeleteMessage(ctx, statusUpdater.chatID, statusUpdater.messageID)
+	if err != nil {
+		logger.Error("failed to delete update status message", zap.Error(err))
+		_ = statusUpdater.Update("File ready: " + publicURL)
+	}
+	_, err = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID)
+	if err != nil {
+		logger.Error("failed to send url to user", zap.Error(err))
+	}
+}
+
+func checkAccess(ctx context.Context, message Message, h *Handler, logger *zap.Logger, api *API) bool {
+	if message.From != nil && len(h.allowedIDs) > 0 {
+		if _, ok := h.allowedIDs[message.From.ID]; !ok {
+			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
+			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
+			return true
+		}
+	}
+	return false
+}
+
+func printIDs(ctx context.Context, message Message, api *API) {
+	fromID := int64(0)
+	if message.From != nil {
+		fromID = message.From.ID
+	}
+	body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
+	_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID)
 }
 
 func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, string, bool, error) {
 	logger := log.Of(ctx)
 	if message.Document != nil {
-		name := message.Document.FileName
-		const telegramFileBin = "telegram-file.bin"
-		if name == "" {
-			name = telegramFileBin
-		}
-		file, err := api.GetFile(ctx, message.Document.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for document, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return name, "", message.Document.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		if name == "" {
-			name = filepath.Base(file.FilePath)
-		}
-		if name == "" {
-			name = telegramFileBin
-		}
-		return name, api.BuildFileDownloadURL(file.FilePath), message.Document.FileID, false, nil
+		return downloadDocument(ctx, message, api, logger, h)
 	}
 	if message.Video != nil {
-		name := message.Video.FileName
-		if name == "" {
-			name = "telegram-video.mp4"
-		}
-		file, err := api.GetFile(ctx, message.Video.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for video, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return name, "", message.Video.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		if name == "" {
-			name = fallbackNameFromPath(file.FilePath, "telegram-video.mp4")
-		}
-		return name, api.BuildFileDownloadURL(file.FilePath), message.Video.FileID, false, nil
+		return downloadVideo(ctx, message, api, logger, h)
 	}
 	if message.Audio != nil {
-		name := message.Audio.FileName
-		if name == "" {
-			name = "telegram-audio.mp3"
-		}
-		file, err := api.GetFile(ctx, message.Audio.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for audio, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return name, "", message.Audio.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		if name == "" {
-			name = fallbackNameFromPath(file.FilePath, "telegram-audio.mp3")
-		}
-		return name, api.BuildFileDownloadURL(file.FilePath), message.Audio.FileID, false, nil
+		return downloadAudio(ctx, message, api, logger, h)
 	}
 	if message.Voice != nil {
-		file, err := api.GetFile(ctx, message.Voice.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for voice, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return "telegram-voice.ogg", "", message.Voice.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		name := fallbackNameFromPath(file.FilePath, "telegram-voice.ogg")
-		return name, api.BuildFileDownloadURL(file.FilePath), message.Voice.FileID, false, nil
+		return downloadVoice(ctx, api, message, logger, h)
 	}
 	if message.VideoNote != nil {
-		file, err := api.GetFile(ctx, message.VideoNote.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for video note, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return "telegram-video-note.mp4", "", message.VideoNote.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		name := fallbackNameFromPath(file.FilePath, "telegram-video-note.mp4")
-		return name, api.BuildFileDownloadURL(file.FilePath), message.VideoNote.FileID, false, nil
+		return downloadVideoNote(ctx, api, message, logger, h)
 	}
 	if len(message.Photo) > 0 {
-		photo := pickLargestPhoto(message.Photo)
-		file, err := api.GetFile(ctx, photo.FileID)
-		if err != nil {
-			logger.Debug("bot getFile failed for photo, considering fallback", zap.Error(err))
-			if h.fallback != nil {
-				return "telegram-photo.jpg", "", photo.FileID, true, nil
-			}
-			return "", "", "", false, err
-		}
-		name := fallbackNameFromPath(file.FilePath, "telegram-photo.jpg")
-		return name, api.BuildFileDownloadURL(file.FilePath), photo.FileID, false, nil
+		return downloadPhotos(ctx, message, api, logger, h)
 	}
 
 	text := strings.TrimSpace(message.Text)
@@ -320,6 +263,107 @@ func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) 
 		return "", "", "", false, errors.New("no url in message")
 	}
 	return downloader.ParseFilenameFromURL(match), match, "", false, nil
+}
+
+func downloadPhotos(ctx context.Context, message Message, api *API, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	photo := pickLargestPhoto(message.Photo)
+	file, err := api.GetFile(ctx, photo.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for photo, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return "telegram-photo.jpg", "", photo.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	name := fallbackNameFromPath(file.FilePath, "telegram-photo.jpg")
+	return name, api.BuildFileDownloadURL(file.FilePath), photo.FileID, false, nil
+}
+
+func downloadVideoNote(ctx context.Context, api *API, message Message, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	file, err := api.GetFile(ctx, message.VideoNote.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for video note, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return "telegram-video-note.mp4", "", message.VideoNote.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	name := fallbackNameFromPath(file.FilePath, "telegram-video-note.mp4")
+	return name, api.BuildFileDownloadURL(file.FilePath), message.VideoNote.FileID, false, nil
+}
+
+func downloadVoice(ctx context.Context, api *API, message Message, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	file, err := api.GetFile(ctx, message.Voice.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for voice, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return "telegram-voice.ogg", "", message.Voice.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	name := fallbackNameFromPath(file.FilePath, "telegram-voice.ogg")
+	return name, api.BuildFileDownloadURL(file.FilePath), message.Voice.FileID, false, nil
+}
+
+func downloadAudio(ctx context.Context, message Message, api *API, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	name := message.Audio.FileName
+	if name == "" {
+		name = "telegram-audio.mp3"
+	}
+	file, err := api.GetFile(ctx, message.Audio.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for audio, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return name, "", message.Audio.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	if name == "" {
+		name = fallbackNameFromPath(file.FilePath, "telegram-audio.mp3")
+	}
+	return name, api.BuildFileDownloadURL(file.FilePath), message.Audio.FileID, false, nil
+}
+
+func downloadVideo(ctx context.Context, message Message, api *API, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	name := message.Video.FileName
+	if name == "" {
+		name = "telegram-video.mp4"
+	}
+	file, err := api.GetFile(ctx, message.Video.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for video, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return name, "", message.Video.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	if name == "" {
+		name = fallbackNameFromPath(file.FilePath, "telegram-video.mp4")
+	}
+	return name, api.BuildFileDownloadURL(file.FilePath), message.Video.FileID, false, nil
+}
+
+func downloadDocument(ctx context.Context, message Message, api *API, logger *zap.Logger, h *Handler) (string, string, string, bool, error) {
+	name := message.Document.FileName
+	const telegramFileBin = "telegram-file.bin"
+	if name == "" {
+		name = telegramFileBin
+	}
+	file, err := api.GetFile(ctx, message.Document.FileID)
+	if err != nil {
+		logger.Debug("bot getFile failed for document, considering fallback", zap.Error(err))
+		if h.fallback != nil {
+			return name, "", message.Document.FileID, true, nil
+		}
+		return "", "", "", false, err
+	}
+	if name == "" {
+		name = filepath.Base(file.FilePath)
+	}
+	if name == "" {
+		name = telegramFileBin
+	}
+	return name, api.BuildFileDownloadURL(file.FilePath), message.Document.FileID, false, nil
 }
 
 type Bot struct {

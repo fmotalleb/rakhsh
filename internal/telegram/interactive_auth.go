@@ -3,6 +3,7 @@ package telegram
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -40,7 +41,7 @@ func (a termAuth) Code(_ context.Context, _ *tg.AuthSentCode) (string, error) {
 }
 
 func (a termAuth) SignUp(ctx context.Context) (auth.UserInfo, error) {
-	return auth.UserInfo{}, fmt.Errorf("signing up is not supported")
+	return auth.UserInfo{}, errors.New("signing up is not supported")
 }
 
 func (a termAuth) AcceptTermsOfService(ctx context.Context, tos tg.HelpTermsOfService) error {

@@ -11,5 +11,5 @@ func Write(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0644)
+	return os.WriteFile(path, b, 0o600)
 }
