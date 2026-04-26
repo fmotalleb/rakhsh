@@ -1,0 +1,54 @@
+services:
+  server:
+    image: ghcr.io/fmotalleb/rakhsh:latest
+    command: [ "--config=/config.yaml" ]
+    configs:
+      - source: rakhsh
+        target: /config.yaml
+    ports:
+      - 8080:8080
+    volumes:
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+      - ./data:/data
+      - ./secrets:/secrets
+    user: "ubuntu"
+    restart: unless-stopped
+
+configs:
+  rakhsh:
+    content: |-
+      http:
+        listen: 0.0.0.0:8080
+        public_url: https://example.com
+        storage: ./data
+
+      telegram:
+        mode: bot_api # bot_api | mtproto_user
+
+        # bot_api mode
+        bot_token: "123456789:telegram_bot_id"
+        user_token: "" # optional fallback if bot_token is empty
+        poll_timeout: 30
+
+        # common
+        allowed_user_ids: [ 123456789 ] # optional; empty means allow all
+        update_interval: 2s # progress update interval (status message is edited in-place)
+
+        # mtproto_user mode + bot_api fallback settings
+        mtproto:
+          fallback_enabled: true # when bot cannot fetch telegram media (e.g. large files), try mtproto user fallback
+          fallback_forward_chat_id: 0 # optional relay: bot forwards message here first, then mtproto downloads from that forwarded message
+          api_id: 0
+          api_hash: ""
+          session_file: ./secrets/mtproto.session
+          device_name: rakhsh
+
+      proxy:
+        socks5_addr: 127.0.0.1:7890
+        socks5_user: ""
+        socks5_password: ""
+
+      download:
+        max_file_size: 0 # 0 = unlimited
+        max_retries: 5
+        retry_delay: 2s
