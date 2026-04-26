@@ -7,48 +7,48 @@ import (
 )
 
 type Config struct {
-	HTTP     HTTPConfig     `mapstructure:"http"`
-	Telegram TelegramConfig `mapstructure:"telegram"`
-	Proxy    ProxyConfig    `mapstructure:"proxy"`
-	Download DownloadConfig `mapstructure:"download"`
+	HTTP     HTTPConfig     `mapstructure:"http" yaml:"http"`
+	Telegram TelegramConfig `mapstructure:"telegram" yaml:"telegram"`
+	Proxy    ProxyConfig    `mapstructure:"proxy" yaml:"proxy"`
+	Download DownloadConfig `mapstructure:"download" yaml:"download"`
 }
 
 type HTTPConfig struct {
-	Listen    netip.AddrPort `mapstructure:"listen"`
-	PublicURL string         `mapstructure:"public_url"`
-	Storage   string         `mapstructure:"storage"`
+	Listen    netip.AddrPort `mapstructure:"listen" yaml:"listen"`
+	PublicURL string         `mapstructure:"public_url" yaml:"public_url"`
+	Storage   string         `mapstructure:"storage" yaml:"storage"`
 }
 
 type TelegramConfig struct {
-	Mode           string        `mapstructure:"mode"`
-	BotToken       string        `mapstructure:"bot_token"`
-	UserToken      string        `mapstructure:"user_token"`
-	AllowedUserIDs []int64       `mapstructure:"allowed_user_ids"`
-	PollTimeout    int           `mapstructure:"poll_timeout"`
-	UpdateInterval time.Duration `mapstructure:"update_interval"`
+	Mode           string        `mapstructure:"mode" yaml:"mode"`
+	BotToken       string        `mapstructure:"bot_token" yaml:"bot_token"`
+	UserToken      string        `mapstructure:"user_token" yaml:"user_token"`
+	AllowedUserIDs []int64       `mapstructure:"allowed_user_ids" yaml:"allowed_user_ids"`
+	PollTimeout    int           `mapstructure:"poll_timeout" yaml:"poll_timeout"`
+	UpdateInterval time.Duration `mapstructure:"update_interval" yaml:"update_interval"`
 
-	MTProto MTProtoConfig `mapstructure:"mtproto"`
+	MTProto MTProtoConfig `mapstructure:"mtproto" yaml:"mtproto"`
 }
 
 type MTProtoConfig struct {
-	FallbackEnabled       bool   `mapstructure:"fallback_enabled"`
-	FallbackForwardChatID int64  `mapstructure:"fallback_forward_chat_id"`
-	APIID                 int    `mapstructure:"api_id"`
-	APIHash               string `mapstructure:"api_hash"`
-	Session               string `mapstructure:"session_file"`
-	DeviceName            string `mapstructure:"device_name"`
+	FallbackEnabled       bool   `mapstructure:"fallback_enabled" yaml:"fallback_enabled"`
+	FallbackForwardChatID int64  `mapstructure:"fallback_forward_chat_id" yaml:"fallback_forward_chat_id"`
+	APIID                 int    `mapstructure:"api_id" yaml:"api_id"`
+	APIHash               string `mapstructure:"api_hash" yaml:"api_hash"`
+	Session               string `mapstructure:"session_file" yaml:"session_file"`
+	DeviceName            string `mapstructure:"device_name" yaml:"device_name"`
 }
 
 type ProxyConfig struct {
-	SOCKS5Addr     string `mapstructure:"socks5_addr"`
-	SOCKS5User     string `mapstructure:"socks5_user"`
-	SOCKS5Password string `mapstructure:"socks5_password"`
+	SOCKS5Addr     string `mapstructure:"socks5_addr" yaml:"socks5_addr"`
+	SOCKS5User     string `mapstructure:"socks5_user" yaml:"socks5_user"`
+	SOCKS5Password string `mapstructure:"socks5_password" yaml:"socks5_password"`
 }
 
 type DownloadConfig struct {
-	MaxFileSize uint64        `mapstructure:"max_file_size"`
-	MaxRetries  uint          `mapstructure:"max_retries"`
-	RetryDelay  time.Duration `mapstructure:"retry_delay"`
+	MaxFileSize uint64        `mapstructure:"max_file_size" yaml:"max_file_size"`
+	MaxRetries  uint          `mapstructure:"max_retries" yaml:"max_retries"`
+	RetryDelay  time.Duration `mapstructure:"retry_delay" yaml:"retry_delay"`
 }
 
 func (c *Config) ApplyDefaults() {
