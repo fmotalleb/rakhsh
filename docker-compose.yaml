@@ -8,6 +8,7 @@ services:
     ports:
       - 8080:8080
     volumes:
+      # since the containerized version is based on `scratch` it lacks any ssl certificate in the container
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
       - ./data:/data
       - ./secrets:/secrets
