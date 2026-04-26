@@ -14,19 +14,22 @@ Rakhsh fetches files sent through Telegram or plain URLs, stores them locally, a
 ## Large File Fallback (Bot + User)
 
 If you keep `bot_api` mode and set `telegram.mtproto.fallback_enabled: true`, Rakhsh will:
+
 1. Try Bot API download first.
 2. If Bot API media fetch fails, try MTProto user download for the same chat/message.
 3. If `telegram.mtproto.fallback_forward_chat_id` is set, bot first forwards the message there, then MTProto downloads from forwarded message.
-4. If sender is the same as configured MTProto user (`mtproto.user_id`) or detected MTProto self account, bot skips forwarding and uses direct MTProto fetch path.
+4. If sender is the same as configured MTProto user (`mtproto.user_id`) or detected MTProto self account, bot skips forwarding and uses direct MTProto fetch path. (this is buggy, use private channel/group instead)
 
-Requirements for fallback to work:
+Requirements for fallback to work: (see link it "How to receive required MTProto info" section to setup an application)
+
 - MTProto account must be authorized (`api_id`, `api_hash`, session).
 - MTProto account must have access to the source chat/message, or you must set `fallback_forward_chat_id` to a chat the MTProto user account can access.
 
 Recommended setup:
+
 - Ensure your MTProto session is correctly set up using the `mtproto-session` command.
 - Start your bot from the same Telegram user account used for MTProto or ensure the MTProto user has access to the `fallback_forward_chat_id`.
-- For the `fallback_forward_chat_id`, create a private channel or a private chat with your MTProto user account and send `/ids` to the bot from there. Use the returned `chat_id`.
+- For the `fallback_forward_chat_id`, create a private channel (preferred) or a private chat with your MTProto user account and send `/ids` to the bot from there. Use the returned `chat_id`.
 - This setup enables the bot to relay large-media messages to that designated private chat/channel, allowing MTProto to fetch them reliably and securely.
 
 ## Features
@@ -43,16 +46,20 @@ Recommended setup:
 See [config.yaml.example](config.yaml.example).
 
 Important for MTProto:
+
 - `telegram.mtproto.api_id` and `telegram.mtproto.api_hash` are required.
 - `telegram.mtproto.session_file` stores your user session.
+- Using `mtproto-session -c config.yaml` the client will ask you the required information, update config and store the `mtproto.session` file in the desired location.
 
 ### How to receive required MTProto info
 
 1. `api_id` and `api_hash`
+
 - Go to `https://my.telegram.org/apps`.
 - Create an app and copy `api_id` and `api_hash`.
 
 5. `fallback_forward_chat_id` (for relay fallback)
+
 - For optimal security and privacy, it is highly recommended to use a private channel or a private chat with your MTProto user account as the `fallback_forward_chat_id`.
 - Send `/ids` to your bot from the chosen private chat/channel.
 - Use the `chat_id` from the response.
@@ -82,4 +89,5 @@ File ready: https://example.com/files/file_<md5>.zip?h=<md5>
 ```
 
 Notes:
+
 - MTProto connections use the same configured SOCKS5 proxy (`proxy.socks5_*`) as other outbound operations.

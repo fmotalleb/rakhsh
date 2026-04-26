@@ -22,6 +22,7 @@ func InteractiveMTProtoSession(ctx context.Context, cfg *config.Config, configPa
 	mt := &cfg.Telegram.MTProto
 
 	if mt.APIID == 0 {
+		fmt.Print("First you need to create an app in https://my.telegram.org/apps")
 		fmt.Print("Enter API ID: ")
 		apiIDStr, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil {
