@@ -24,9 +24,10 @@ Requirements for fallback to work:
 - MTProto account must have access to the source chat/message, or you must set `fallback_forward_chat_id` to a chat the MTProto user account can access.
 
 Recommended setup:
-- Start your bot from the same Telegram user account used for MTProto.
-- Send `/ids` to the bot from that account and use returned `chat_id` as `fallback_forward_chat_id`.
-- This makes bot relay large-media messages to that chat, then MTProto can fetch reliably.
+- Ensure your MTProto session is correctly set up using the `mtproto-session` command.
+- Start your bot from the same Telegram user account used for MTProto or ensure the MTProto user has access to the `fallback_forward_chat_id`.
+- For the `fallback_forward_chat_id`, create a private channel or a private chat with your MTProto user account and send `/ids` to the bot from there. Use the returned `chat_id`.
+- This setup enables the bot to relay large-media messages to that designated private chat/channel, allowing MTProto to fetch them reliably and securely.
 
 ## Features
 
@@ -52,8 +53,9 @@ Important for MTProto:
 - Create an app and copy `api_id` and `api_hash`.
 
 5. `fallback_forward_chat_id` (for relay fallback)
-- Send `/ids` to your bot from the relay chat.
-- Use `chat_id` from the response.
+- For optimal security and privacy, it is highly recommended to use a private channel or a private chat with your MTProto user account as the `fallback_forward_chat_id`.
+- Send `/ids` to your bot from the chosen private chat/channel.
+- Use the `chat_id` from the response.
 - You can also use `/ids` to capture `from_user_id` for `allowed_user_ids`.
 
 ## Run
