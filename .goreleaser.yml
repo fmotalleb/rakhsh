@@ -19,7 +19,7 @@ builds:
       - "-X github.com/fmotalleb/go-tools/git.Branch={{.Branch}}"
     goarch:
       - amd64
-      - arm64
+      # - arm64
 
 dockers:
   - image_templates:
