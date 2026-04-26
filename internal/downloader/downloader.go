@@ -48,7 +48,7 @@ Speed: %s
 Average: %s
 Elapsed: %s
 ETA: %s
-attempt=%d`,
+Attempt: %d`,
 			helper.HumanBytes(p.Downloaded),
 			helper.HumanBytes(p.Total),
 			percent,
@@ -61,7 +61,11 @@ attempt=%d`,
 	}
 
 	return fmt.Sprintf(
-		"%s speed=%s avg=%s elapsed=%s [attempt %d]",
+		`%s/Unknown
+Speed: %s
+Average: %s
+Elapsed=%s
+Attempt: %d`,
 		helper.HumanBytes(p.Downloaded),
 		speed,
 		avg,
