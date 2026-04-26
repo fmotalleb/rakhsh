@@ -10,13 +10,17 @@ builds:
       - darwin
       - linux
       - windows
+    ldflags:
+      - "-s"
+      - "-w"
+      - "-X github.com/fmotalleb/go-tools/git.Version={{.Version}}"
+      - "-X github.com/fmotalleb/go-tools/git.Commit={{.ShortCommit}}"
+      - "-X github.com/fmotalleb/go-tools/git.Date={{.Date}}"
+      - "-X github.com/fmotalleb/go-tools/git.Branch={{.Branch}}"
     goarch:
       - amd64
-archives:
-  - format_overrides:
-      - goos: windows
-        formats:
-          - zip
+      - arm64
+
 dockers:
   - image_templates:
       - "ghcr.io/fmotalleb/rakhsh:latest"
@@ -33,6 +37,8 @@ dockers:
       - "--label=org.opencontainers.image.source={{.GitURL}}"
 release:
   github:
+    name: rakhsh
+    owner: fmotalleb
   name_template: "{{.Version}}"
   prerelease: auto
   mode: append
