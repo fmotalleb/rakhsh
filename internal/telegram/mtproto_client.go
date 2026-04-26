@@ -21,14 +21,28 @@ func newMTProtoClient(cfg *config.Config, logger *zap.Logger, updateHandler gotd
 
 	dialer := netx.NewSOCKS5Dialer(cfg.Proxy.SOCKS5Addr, cfg.Proxy.SOCKS5User, cfg.Proxy.SOCKS5Password)
 	resolver := dcs.Plain(dcs.PlainOptions{
-		Dial: dcs.DialFunc(dialer),
+		Dial:       dcs.DialFunc(dialer),
+		PreferIPv6: false,
 	})
-
+	originalDCS := dcs.Prod()
+	ipv4DCS := new(dcs.List)
+	for _, i := range originalDCS.Options {
+		if !i.Ipv6 {
+			ipv4DCS.Options = append(ipv4DCS.Options, i)
+		}
+	}
+	ipv4DCS.Domains = originalDCS.Domains
+	ipv4DCS.Test = false
 	opts := gotd.Options{
 		Logger:         logger,
+		DCList:         *ipv4DCS,
 		SessionStorage: &session.FileStorage{Path: mt.Session},
 		Resolver:       resolver,
 		UpdateHandler:  updateHandler,
+		AllowCDN:       true,
+		OnDead: func(err error) {
+			logger.Error("Telegram client is dead", zap.Error(err))
+		},
 	}
 	return gotd.NewClient(mt.APIID, mt.APIHash, opts), nil
 }

@@ -17,6 +17,7 @@ var mtprotoSessionCmd = &cobra.Command{
 	Use:   "mtproto-session",
 	Short: "Create or verify MTProto user session file",
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		log.SetDebugDefaults()
 		configFile, err := cmd.Flags().GetString("config")
 		if err != nil {
 			return err
