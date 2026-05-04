@@ -27,11 +27,13 @@ import (
 var urlRegex = regexp.MustCompile(`https?://[^\s]+`)
 
 type Handler struct {
-	cfg        config.Config
-	dl         *downloader.Downloader
-	storage    *storage.Storage
-	fallback   *MTProtoFallback
-	allowedIDs map[int64]struct{}
+	cfg             config.Config
+	dl              *downloader.Downloader
+	storage         *storage.Storage
+	fallback        *MTProtoFallback
+	allowedIDs      map[int64]struct{}
+	downloadCancels map[string]context.CancelFunc
+	mu              sync.Mutex
 }
 
 func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Storage, fallback *MTProtoFallback) *Handler {
@@ -39,7 +41,40 @@ func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Sto
 	for _, id := range cfg.Telegram.AllowedUserIDs {
 		allowed[id] = struct{}{}
 	}
-	return &Handler{cfg: cfg, dl: dl, storage: store, fallback: fallback, allowedIDs: allowed}
+	return &Handler{
+		cfg:             cfg,
+		dl:              dl,
+		storage:         store,
+		fallback:        fallback,
+		allowedIDs:      allowed,
+		downloadCancels: make(map[string]context.CancelFunc),
+	}
+}
+
+func (h *Handler) HandleCallbackQuery(ctx context.Context, api *API, q *CallbackQuery) {
+	logger := log.Of(ctx)
+	logger.Debug("callback query received",
+		zap.String("callback_query_id", q.ID),
+		zap.String("data", q.Data),
+		zap.Int64("from_id", q.From.ID),
+	)
+	if strings.HasPrefix(q.Data, "cancel:") {
+		cancelKey := strings.TrimPrefix(q.Data, "cancel:")
+		h.mu.Lock()
+		cancel, ok := h.downloadCancels[cancelKey]
+		h.mu.Unlock()
+		if ok {
+			cancel()
+			logger.Debug("download cancelled", zap.String("cancel_key", cancelKey))
+			_ = api.AnswerCallbackQuery(ctx, q.ID, "Download cancelled.")
+			if q.Message != nil {
+				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download cancelled.")
+			}
+		} else {
+			logger.Warn("cancel key not found", zap.String("cancel_key", cancelKey))
+			_ = api.AnswerCallbackQuery(ctx, q.ID, "Could not cancel download (maybe it is already finished).")
+		}
+	}
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) {
@@ -66,8 +101,14 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	if hasAccess {
 		return
 	}
-
-	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID)
+	cancelKey := fmt.Sprintf("%d:%d", message.Chat.ID, message.MessageID)
+	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID, &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "Cancel", CallbackData: "cancel:" + cancelKey},
+			},
+		},
+	})
 	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID)
 	_ = statusUpdater.Update("Preparing download...")
 
@@ -87,7 +128,17 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		logger.Warn("cleanup temp file failed", zap.Error(removeErr), zap.String("path", tempPath))
 	}
+	downloadCtx, cancel := context.WithCancel(ctx)
+	h.mu.Lock()
+	h.downloadCancels[cancelKey] = cancel
+	h.mu.Unlock()
 
+	defer func() {
+		h.mu.Lock()
+		delete(h.downloadCancels, cancelKey)
+		h.mu.Unlock()
+		cancel()
+	}()
 	if useMTProtoFallback {
 		if h.fallback == nil {
 			_ = statusUpdater.Update("Download failed: mtproto fallback is not configured")
@@ -136,7 +187,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 
 		_ = statusUpdater.Update("MTProto download started...")
 		if err = h.fallback.DownloadFromBotMessage(
-			ctx,
+			downloadCtx,
 			fallbackChatID,
 			fallbackMessageID,
 			tempPath,
@@ -170,7 +221,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		}
 	} else {
 		if err = h.dl.DownloadWithProgress(
-			ctx,
+			downloadCtx,
 			sourceURL,
 			tempPath,
 			h.cfg.Telegram.UpdateInterval,
@@ -207,7 +258,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		logger.Error("failed to delete update status message", zap.Error(err))
 		_ = statusUpdater.Update("File ready: " + publicURL)
 	}
-	_, err = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID)
+	_, err = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID, nil)
 	if err != nil {
 		logger.Error("failed to send url to user", zap.Error(err))
 	}
@@ -217,7 +268,7 @@ func checkAccess(ctx context.Context, message Message, h *Handler, logger *zap.L
 	if message.From != nil && len(h.allowedIDs) > 0 {
 		if _, ok := h.allowedIDs[message.From.ID]; !ok {
 			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
-			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID)
+			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID, nil)
 			return true
 		}
 	}
@@ -230,7 +281,7 @@ func printIDs(ctx context.Context, message Message, api *API) {
 		fromID = message.From.ID
 	}
 	body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
-	_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID)
+	_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID, nil)
 }
 
 func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, string, bool, error) {
@@ -403,14 +454,15 @@ func (b *Bot) Run(ctx context.Context) error {
 			if update.UpdateID >= offset {
 				offset = update.UpdateID + 1
 			}
-			if update.Message == nil {
-				continue
+			if update.Message != nil {
+				if update.Message.Date > 0 && int64(update.Message.Date) < b.started {
+					logger.Debug("ignoring old message", zap.Int64("message_date", int64(update.Message.Date)), zap.Int64("started", b.started))
+					continue
+				}
+				b.handler.HandleMessage(ctx, b.api, *update.Message)
+			} else if update.CallbackQuery != nil {
+				b.handler.HandleCallbackQuery(ctx, b.api, update.CallbackQuery)
 			}
-			if update.Message.Date > 0 && int64(update.Message.Date) < b.started {
-				logger.Debug("ignoring old message", zap.Int64("message_date", int64(update.Message.Date)), zap.Int64("started", b.started))
-				continue
-			}
-			b.handler.HandleMessage(ctx, b.api, *update.Message)
 		}
 	}
 }
@@ -475,7 +527,7 @@ func (a *API) GetUpdatesWithLimit(ctx context.Context, offset int64, timeout int
 	if limit > 0 {
 		values.Set("limit", strconv.Itoa(limit))
 	}
-	values.Set("allowed_updates", `["message"]`)
+	values.Set("allowed_updates", `["message","callback_query"]`)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("getUpdates"), strings.NewReader(values.Encode()))
 	if err != nil {
@@ -500,7 +552,7 @@ func (a *API) GetUpdatesWithLimit(ctx context.Context, offset int64, timeout int
 	return payload.Result, nil
 }
 
-func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (Message, error) {
+func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64, replyMarkup *InlineKeyboardMarkup) (Message, error) {
 	log.Of(ctx).Debug("telegram api request",
 		zap.String("method", "sendMessage"),
 		zap.Int64("chat_id", chatID),
@@ -512,6 +564,13 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 	values.Set("text", text)
 	if replyTo > 0 {
 		values.Set("reply_to_message_id", strconv.FormatInt(replyTo, 10))
+	}
+	if replyMarkup != nil {
+		markupBytes, err := json.Marshal(replyMarkup)
+		if err != nil {
+			return Message{}, fmt.Errorf("marshal reply markup: %w", err)
+		}
+		values.Set("reply_markup", string(markupBytes))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("sendMessage"), strings.NewReader(values.Encode()))
@@ -669,6 +728,39 @@ func (a *API) DeleteMessage(ctx context.Context, chatID int64, messageID int64) 
 	return nil
 }
 
+func (a *API) AnswerCallbackQuery(ctx context.Context, callbackQueryID string, text string) error {
+	log.Of(ctx).Debug("telegram api request",
+		zap.String("method", "answerCallbackQuery"),
+		zap.String("callback_query_id", callbackQueryID),
+		zap.String("text", text),
+	)
+	values := url.Values{}
+	values.Set("callback_query_id", callbackQueryID)
+	values.Set("text", text)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("answerCallbackQuery"), strings.NewReader(values.Encode()))
+	if err != nil {
+		return fmt.Errorf("create answerCallbackQuery request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	log.Of(ctx).Debug("telegram api response", zap.String("method", "answerCallbackQuery"), zap.Int("status_code", resp.StatusCode))
+
+	var payload apiResponse[json.RawMessage]
+	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.OK {
+		return fmt.Errorf("answerCallbackQuery failed: %s", payload.Description)
+	}
+	return nil
+}
+
 func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
 	log.Of(ctx).Debug("telegram api request",
 		zap.String("method", "editMessageText"),
@@ -711,9 +803,27 @@ type apiResponse[T any] struct {
 }
 
 type Update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *Message `json:"message"`
+	UpdateID      int64          `json:"update_id"`
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
 }
+
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	From    User     `json:"from"`
+	Message *Message `json:"message"`
+	Data    string   `json:"data"`
+}
+
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
 
 type Message struct {
 	MessageID int64      `json:"message_id"`
