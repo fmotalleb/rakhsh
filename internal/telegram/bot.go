@@ -68,7 +68,7 @@ func (h *Handler) HandleCallbackQuery(ctx context.Context, api *API, q *Callback
 			logger.Debug("download cancelled", zap.String("cancel_key", cancelKey))
 			_ = api.AnswerCallbackQuery(ctx, q.ID, "Download cancelled.")
 			if q.Message != nil {
-				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download cancelled.")
+				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download cancelled.", nil)
 			}
 		} else {
 			logger.Warn("cancel key not found", zap.String("cancel_key", cancelKey))
@@ -102,19 +102,19 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 		return
 	}
 	cancelKey := fmt.Sprintf("%d:%d", message.Chat.ID, message.MessageID)
-	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID, &InlineKeyboardMarkup{
+	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID, nil)
+	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID, &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
 				{Text: "Cancel", CallbackData: "cancel:" + cancelKey},
 			},
 		},
 	})
-	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID)
 	_ = statusUpdater.Update("Preparing download...")
 
 	fileName, sourceURL, fileID, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
 	if err != nil {
-		_ = statusUpdater.Update("Please send a direct URL or attach a document")
+		_ = statusUpdater.UpdateAndRemoveMarkup("Please send a direct URL or attach a document")
 		logger.Debug("message ignored", zap.Error(err))
 		return
 	}
@@ -141,7 +141,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	}()
 	if useMTProtoFallback {
 		if h.fallback == nil {
-			_ = statusUpdater.Update("Download failed: mtproto fallback is not configured")
+			_ = statusUpdater.UpdateAndRemoveMarkup("Download failed: mtproto fallback is not configured")
 			return
 		}
 		fallbackChatID := message.Chat.ID
@@ -165,7 +165,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 			sentMessage, sendErr := api.SendDocument(ctx, h.cfg.Telegram.MTProto.FallbackForwardChatID, fileID)
 			if sendErr != nil || sentMessage.MessageID == 0 {
 				logger.Warn("fallback send document failed, giving up", zap.Error(sendErr))
-				_ = statusUpdater.Update("Failed to relay message for MTProto fallback.")
+				_ = statusUpdater.UpdateAndRemoveMarkup("Failed to relay message for MTProto fallback.")
 				return
 			}
 			fallbackChatID = sentMessage.Chat.ID
@@ -204,7 +204,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				_ = statusUpdater.Update(formatMTProtoProgress(p))
 			},
 		); err != nil {
-			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
+			_ = statusUpdater.UpdateAndRemoveMarkup(fmt.Sprintf("Download failed: %v", err))
 			logger.Warn("mtproto fallback failed",
 				zap.Error(err),
 				zap.Int64("source_chat_id", message.Chat.ID),
@@ -234,7 +234,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 				_ = statusUpdater.Update(progress.String())
 			},
 		); err != nil {
-			_ = statusUpdater.Update(fmt.Sprintf("Download failed: %v", err))
+			_ = statusUpdater.UpdateAndRemoveMarkup(fmt.Sprintf("Download failed: %v", err))
 			logger.Warn("download failed", zap.Error(err), zap.String("url", sourceURL))
 			return
 		}
@@ -242,7 +242,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 
 	storedName, md5Hex, err := h.storage.Finalize(tempPath, fileName)
 	if err != nil {
-		_ = statusUpdater.Update(fmt.Sprintf("Save failed: %v", err))
+		_ = statusUpdater.UpdateAndRemoveMarkup(fmt.Sprintf("Save failed: %v", err))
 		logger.Error("finalize failed", zap.Error(err))
 		return
 	}
@@ -256,7 +256,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	err = api.DeleteMessage(ctx, statusUpdater.chatID, statusUpdater.messageID)
 	if err != nil {
 		logger.Error("failed to delete update status message", zap.Error(err))
-		_ = statusUpdater.Update("File ready: " + publicURL)
+		_ = statusUpdater.UpdateAndRemoveMarkup("File ready: " + publicURL)
 	}
 	_, err = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID, nil)
 	if err != nil {
@@ -280,7 +280,9 @@ func printIDs(ctx context.Context, message Message, api *API) {
 	if message.From != nil {
 		fromID = message.From.ID
 	}
-	body := fmt.Sprintf("chat_id: %d\nfrom_user_id: %d\nmessage_id: %d", message.Chat.ID, fromID, message.MessageID)
+	body := fmt.Sprintf(`chat_id: %d
+from_user_id: %d
+message_id: %d`, message.Chat.ID, fromID, message.MessageID)
 	_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID, nil)
 }
 
@@ -761,7 +763,7 @@ func (a *API) AnswerCallbackQuery(ctx context.Context, callbackQueryID string, t
 	return nil
 }
 
-func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string) error {
+func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64, text string, replyMarkup *InlineKeyboardMarkup) error {
 	log.Of(ctx).Debug("telegram api request",
 		zap.String("method", "editMessageText"),
 		zap.Int64("chat_id", chatID),
@@ -772,6 +774,13 @@ func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64
 	values.Set("chat_id", strconv.FormatInt(chatID, 10))
 	values.Set("message_id", strconv.FormatInt(messageID, 10))
 	values.Set("text", text)
+	if replyMarkup != nil {
+		markupBytes, err := json.Marshal(replyMarkup)
+		if err != nil {
+			return fmt.Errorf("marshal reply markup: %w", err)
+		}
+		values.Set("reply_markup", string(markupBytes))
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("editMessageText"), strings.NewReader(values.Encode()))
 	if err != nil {
@@ -823,7 +832,6 @@ type InlineKeyboardButton struct {
 	Text         string `json:"text"`
 	CallbackData string `json:"callback_data"`
 }
-
 
 type Message struct {
 	MessageID int64      `json:"message_id"`
@@ -911,20 +919,22 @@ func fallbackNameFromPath(filePath, fallback string) string {
 }
 
 type statusUpdater struct {
-	ctx       context.Context
-	api       *API
-	chatID    int64
-	messageID int64
-	mu        sync.Mutex
-	lastText  string
+	ctx         context.Context
+	api         *API
+	chatID      int64
+	messageID   int64
+	mu          sync.Mutex
+	lastText    string
+	replyMarkup *InlineKeyboardMarkup
 }
 
-func newStatusUpdater(ctx context.Context, api *API, chatID int64, messageID int64) *statusUpdater {
+func newStatusUpdater(ctx context.Context, api *API, chatID int64, messageID int64, replyMarkup *InlineKeyboardMarkup) *statusUpdater {
 	return &statusUpdater{
-		ctx:       ctx,
-		api:       api,
-		chatID:    chatID,
-		messageID: messageID,
+		ctx:         ctx,
+		api:         api,
+		chatID:      chatID,
+		messageID:   messageID,
+		replyMarkup: replyMarkup,
 	}
 }
 
@@ -934,10 +944,24 @@ func (u *statusUpdater) Update(text string) error {
 	if text == "" || text == u.lastText {
 		return nil
 	}
-	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text); err != nil {
+	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text, u.replyMarkup); err != nil {
 		return err
 	}
 	u.lastText = text
+	return nil
+}
+
+func (u *statusUpdater) UpdateAndRemoveMarkup(text string) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if text == "" || text == u.lastText {
+		return nil
+	}
+	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text, nil); err != nil {
+		return err
+	}
+	u.lastText = text
+	u.replyMarkup = nil
 	return nil
 }
 
