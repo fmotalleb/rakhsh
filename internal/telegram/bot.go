@@ -78,6 +78,10 @@ func (h *Handler) HandleCallbackQuery(ctx context.Context, api *API, q *Callback
 }
 
 func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) {
+	go h.handler(ctx, message, api)
+}
+
+func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 	logger := log.Of(ctx)
 	logger.Debug("message received",
 		zap.Int64("chat_id", message.Chat.ID),
@@ -262,6 +266,7 @@ func (h *Handler) HandleMessage(ctx context.Context, api *API, message Message) 
 	if err != nil {
 		logger.Error("failed to send url to user", zap.Error(err))
 	}
+	return
 }
 
 func checkAccess(ctx context.Context, message Message, h *Handler, logger *zap.Logger, api *API) bool {
