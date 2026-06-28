@@ -4,9 +4,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/gotd/log/logzap"
 	"github.com/gotd/td/session"
 	gotd "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/dcs"
+
 	"go.uber.org/zap"
 
 	"github.com/fmotalleb/rakhsh/config"
@@ -34,7 +36,7 @@ func newMTProtoClient(cfg *config.Config, logger *zap.Logger, updateHandler gotd
 	ipv4DCS.Domains = originalDCS.Domains
 	ipv4DCS.Test = false
 	opts := gotd.Options{
-		Logger:         logger,
+		Logger:         logzap.New(logger),
 		DCList:         *ipv4DCS,
 		SessionStorage: &session.FileStorage{Path: mt.Session},
 		Resolver:       resolver,

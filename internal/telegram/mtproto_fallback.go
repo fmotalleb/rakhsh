@@ -350,7 +350,7 @@ func mtprotoLocationFromMessage(msg *tg.Message) (tg.InputFileLocationClass, err
 		if !ok {
 			return nil, errors.New("unsupported document type")
 		}
-		return doc.AsInputDocumentFileLocation(), nil
+		return doc.AsInputDocumentFileLocation(""), nil
 	case *tg.MessageMediaPhoto:
 		photoClass, ok := m.GetPhoto()
 		if !ok {

@@ -173,7 +173,7 @@ func (b *MTProtoUserBot) resolveMTProtoSource(msg *tg.Message) (string, string, 
 		if name == "" {
 			name = "telegram-file.bin"
 		}
-		return name, "", doc.AsInputDocumentFileLocation(), nil
+		return name, "", doc.AsInputDocumentFileLocation(""), nil
 	case *tg.MessageMediaPhoto:
 		photoClass, ok := m.GetPhoto()
 		if !ok {
