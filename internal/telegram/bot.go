@@ -33,6 +33,7 @@ type Handler struct {
 	fallback        *MTProtoFallback
 	allowedIDs      map[int64]struct{}
 	downloadCancels map[string]context.CancelFunc
+	editLimiter     *chatEditLimiter
 	mu              sync.Mutex
 }
 
@@ -48,6 +49,7 @@ func NewHandler(cfg config.Config, dl *downloader.Downloader, store *storage.Sto
 		fallback:        fallback,
 		allowedIDs:      allowed,
 		downloadCancels: make(map[string]context.CancelFunc),
+		editLimiter:     newChatEditLimiter(time.Second),
 	}
 }
 
@@ -113,7 +115,7 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 				{Text: "Cancel", CallbackData: "cancel:" + cancelKey},
 			},
 		},
-	})
+	}, h.editLimiter)
 	_ = statusUpdater.Update("Preparing download...")
 
 	fileName, sourceURL, fileID, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
@@ -257,14 +259,13 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 		zap.String("md5", md5Hex),
 		zap.String("public_url", publicURL),
 	)
-	err = api.DeleteMessage(ctx, statusUpdater.chatID, statusUpdater.messageID)
-	if err != nil {
-		logger.Error("failed to delete update status message", zap.Error(err))
-		_ = statusUpdater.UpdateAndRemoveMarkup("File ready: " + publicURL)
-	}
-	_, err = api.SendMessage(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID, nil)
-	if err != nil {
+	if err = api.sendMessageWithRetry(ctx, message.Chat.ID, "File ready: "+publicURL, message.MessageID); err != nil {
 		logger.Error("failed to send url to user", zap.Error(err))
+		_ = statusUpdater.UpdateAndRemoveMarkup("File ready: " + publicURL)
+		return
+	}
+	if err = api.DeleteMessage(ctx, statusUpdater.chatID, statusUpdater.messageID); err != nil {
+		logger.Error("failed to delete update status message", zap.Error(err))
 	}
 	return
 }
@@ -598,9 +599,57 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 		return Message{}, err
 	}
 	if !payload.OK {
-		return Message{}, fmt.Errorf("sendMessage failed: %s", payload.Description)
+		return Message{}, &apiError{
+			method:      "sendMessage",
+			description: payload.Description,
+			retryAfter:  payload.retryAfter(),
+		}
 	}
 	return payload.Result, nil
+}
+
+// maxSendRetries bounds how many times sendMessageWithRetry retries a message.
+const maxSendRetries = 5
+
+// sendMessageWithRetry sends text and retries on Telegram flood control
+// (HTTP 429, honoring retry_after) and on transient errors with backoff. The
+// final URL notification is the only chance the user gets the link, so it must
+// not be dropped silently like regular progress edits.
+func (a *API) sendMessageWithRetry(ctx context.Context, chatID int64, text string, replyTo int64) error {
+	logger := log.Of(ctx)
+	var lastErr error
+	for attempt := 0; attempt < maxSendRetries; attempt++ {
+		_, err := a.SendMessage(ctx, chatID, text, replyTo, nil)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		var apiErr *apiError
+		if errors.As(err, &apiErr) && apiErr.retryAfter > 0 {
+			delay := time.Duration(apiErr.retryAfter) * time.Second
+			if delay > 30*time.Second {
+				delay = 30 * time.Second
+			}
+			delay += time.Duration(time.Now().UnixNano() % int64(time.Second))
+			logger.Warn("telegram rate limited while sending url, waiting",
+				zap.Int("retry_after", apiErr.retryAfter),
+				zap.Int("attempt", attempt+1),
+			)
+			if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+				return sleepErr
+			}
+			continue
+		}
+		delay := time.Duration(1<<uint(attempt)) * time.Second
+		logger.Warn("failed to send url, retrying",
+			zap.Error(err),
+			zap.Int("attempt", attempt+1),
+		)
+		if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+			return sleepErr
+		}
+	}
+	return lastErr
 }
 
 func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
@@ -811,9 +860,33 @@ func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64
 }
 
 type apiResponse[T any] struct {
-	OK          bool   `json:"ok"`
-	Result      T      `json:"result"`
-	Description string `json:"description"`
+	OK          bool                `json:"ok"`
+	Result      T                   `json:"result"`
+	Description string              `json:"description"`
+	Parameters  *responseParameters `json:"parameters"`
+}
+
+func (r apiResponse[T]) retryAfter() int {
+	if r.Parameters != nil {
+		return r.Parameters.RetryAfter
+	}
+	return 0
+}
+
+type responseParameters struct {
+	RetryAfter int `json:"retry_after"`
+}
+
+// apiError is a Telegram Bot API error carrying the method name and, when the
+// API responds with HTTP 429, the suggested retry delay.
+type apiError struct {
+	method      string
+	description string
+	retryAfter  int
+}
+
+func (e *apiError) Error() string {
+	return fmt.Sprintf("%s failed: %s", e.method, e.description)
 }
 
 type Update struct {
@@ -931,15 +1004,17 @@ type statusUpdater struct {
 	mu          sync.Mutex
 	lastText    string
 	replyMarkup *InlineKeyboardMarkup
+	limiter     *chatEditLimiter
 }
 
-func newStatusUpdater(ctx context.Context, api *API, chatID int64, messageID int64, replyMarkup *InlineKeyboardMarkup) *statusUpdater {
+func newStatusUpdater(ctx context.Context, api *API, chatID int64, messageID int64, replyMarkup *InlineKeyboardMarkup, limiter *chatEditLimiter) *statusUpdater {
 	return &statusUpdater{
 		ctx:         ctx,
 		api:         api,
 		chatID:      chatID,
 		messageID:   messageID,
 		replyMarkup: replyMarkup,
+		limiter:     limiter,
 	}
 }
 
@@ -947,6 +1022,9 @@ func (u *statusUpdater) Update(text string) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if text == "" || text == u.lastText {
+		return nil
+	}
+	if !u.limiter.allow(u.chatID) {
 		return nil
 	}
 	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text, u.replyMarkup); err != nil {
@@ -990,4 +1068,13 @@ ETA: %s`,
 		helper.HumanBytes(int64(p.CurrentSpeed)),
 		p.Elapsed.Truncate(time.Second),
 	)
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	select {
+	case <-time.After(delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

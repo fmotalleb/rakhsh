@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased](https://github.com/fmotalleb/rakhsh/compare/v0.23.0...HEAD)
 
+### Fixed
+
+- Send a download link for every concurrent download instead of dropping it when Telegram flood control (HTTP 429) rejects the final message; status edits are now rate-limited per chat and the final link is retried with backoff.
+
 ## [0.23.0](https://github.com/fmotalleb/rakhsh/releases/tag/v0.23.0)
 
 ### Added
