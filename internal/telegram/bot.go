@@ -454,7 +454,7 @@ func (b *Bot) Run(ctx context.Context) error {
 
 		updates, err := b.api.GetUpdates(ctx, offset, b.cfg.Telegram.PollTimeout)
 		if err != nil {
-			logger.Warn("getUpdates failed", zap.Error(err))
+			logger.Debug("getUpdates failed", zap.Error(err))
 			continue
 		}
 		logger.Debug("updates received", zap.Int("count", len(updates)), zap.Int64("offset", offset))
