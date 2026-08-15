@@ -68,9 +68,9 @@ func (h *Handler) HandleCallbackQuery(ctx context.Context, api *API, q *Callback
 		if ok {
 			cancel()
 			logger.Info("download cancel requested", zap.String("cancel_key", cancelKey), zap.Int64("from_user_id", q.From.ID))
-			_ = api.AnswerCallbackQuery(ctx, q.ID, "Download cancelled.")
+			_ = api.AnswerCallbackQuery(ctx, q.ID, "Download canceled.")
 			if q.Message != nil {
-				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download cancelled.", nil)
+				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download canceled.", nil)
 			}
 		} else {
 			logger.Warn("cancel key not found", zap.String("cancel_key", cancelKey))
@@ -155,8 +155,8 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 			_ = statusUpdater.UpdateAndRemoveMarkup("Download failed: mtproto fallback is not configured")
 			return
 		}
-		fallbackChatID := message.Chat.ID
-		fallbackMessageID := message.MessageID
+		var fallbackChatID int64
+		var fallbackMessageID int64
 
 		wasRelayed := false
 		_ = statusUpdater.Update("Switching to MTProto fallback (relay)...")
@@ -278,7 +278,6 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 		zap.String("file_name", fileName),
 		zap.String("public_url", publicURL),
 	)
-	return
 }
 
 func checkAccess(ctx context.Context, message Message, h *Handler, logger *zap.Logger, api *API) bool {
