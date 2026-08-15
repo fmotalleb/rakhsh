@@ -100,18 +100,22 @@ func (b *MTProtoUserBot) handleNewMessage(
 	if hasFrom && len(b.cfg.Telegram.AllowedUserIDs) > 0 {
 		peerUser, ok := fromID.(*tg.PeerUser)
 		if !ok || !isAllowedUser(peerUser.UserID, b.cfg.Telegram.AllowedUserIDs) {
-			_, _ = sender.Reply(entities, update).Text(ctx, "You are not allowed to use this bot")
+			logger.Warn("mtproto access denied", zap.Int("message_id", msg.ID))
+			if _, err := sender.Reply(entities, update).Text(ctx, "You are not allowed to use this bot"); err != nil {
+				logger.Debug("mtproto reply failed", zap.Error(err))
+			}
 			return nil
 		}
 	}
 
 	fileName, directURL, location, err := b.resolveMTProtoSource(msg)
 	if err != nil {
+		logger.Debug("mtproto message ignored", zap.Error(err), zap.Int("message_id", msg.ID))
 		return nil
 	}
-	logger.Debug("mtproto source resolved",
+	logger.Info("mtproto download started",
+		zap.Int("message_id", msg.ID),
 		zap.String("file_name", fileName),
-		zap.String("direct_url", directURL),
 		zap.Bool("use_location", location != nil),
 	)
 
@@ -122,29 +126,40 @@ func (b *MTProtoUserBot) handleNewMessage(
 
 	if directURL != "" {
 		if err = b.dl.Download(ctx, directURL, tempPath); err != nil {
-			_, _ = sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Download failed: %v", err))
+			logger.Warn("mtproto url download failed", zap.Error(err), zap.Int("message_id", msg.ID))
+			if _, replyErr := sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Download failed: %v", err)); replyErr != nil {
+				logger.Debug("mtproto reply failed", zap.Error(replyErr))
+			}
 			return nil
 		}
 	} else {
 		logger.Debug("mtproto downloader started", zap.String("temp_path", tempPath))
 		if _, err = download.Download(client.API(), location).ToPath(ctx, tempPath); err != nil {
-			_, _ = sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Telegram media download failed: %v", err))
+			logger.Warn("mtproto media download failed", zap.Error(err), zap.Int("message_id", msg.ID))
+			if _, replyErr := sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Telegram media download failed: %v", err)); replyErr != nil {
+				logger.Debug("mtproto reply failed", zap.Error(replyErr))
+			}
 			return nil
 		}
 	}
 
 	storedName, md5Hex, err := b.storage.Finalize(tempPath, fileName)
 	if err != nil {
-		_, _ = sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Save failed: %v", err))
+		logger.Error("mtproto finalize failed", zap.Error(err), zap.Int("message_id", msg.ID))
+		if _, replyErr := sender.Reply(entities, update).Text(ctx, fmt.Sprintf("Save failed: %v", err)); replyErr != nil {
+			logger.Debug("mtproto reply failed", zap.Error(replyErr))
+		}
 		return nil
 	}
 	publicURL := strings.TrimRight(b.cfg.HTTP.PublicURL, "/") + "/files/" + url.PathEscape(storedName) + "?h=" + md5Hex
-	logger.Debug("mtproto file finalized",
-		zap.String("stored_name", storedName),
-		zap.String("md5", md5Hex),
+	logger.Info("mtproto download completed",
+		zap.Int("message_id", msg.ID),
+		zap.String("file_name", fileName),
 		zap.String("public_url", publicURL),
 	)
-	_, _ = sender.Reply(entities, update).Text(ctx, "File ready: "+publicURL)
+	if _, replyErr := sender.Reply(entities, update).Text(ctx, "File ready: "+publicURL); replyErr != nil {
+		logger.Debug("mtproto reply failed", zap.Error(replyErr))
+	}
 	return nil
 }
 

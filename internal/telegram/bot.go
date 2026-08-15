@@ -67,7 +67,7 @@ func (h *Handler) HandleCallbackQuery(ctx context.Context, api *API, q *Callback
 		h.mu.Unlock()
 		if ok {
 			cancel()
-			logger.Debug("download cancelled", zap.String("cancel_key", cancelKey))
+			logger.Info("download cancel requested", zap.String("cancel_key", cancelKey), zap.Int64("from_user_id", q.From.ID))
 			_ = api.AnswerCallbackQuery(ctx, q.ID, "Download cancelled.")
 			if q.Message != nil {
 				_ = api.EditMessageText(ctx, q.Message.Chat.ID, q.Message.MessageID, "Download cancelled.", nil)
@@ -108,7 +108,10 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 		return
 	}
 	cancelKey := fmt.Sprintf("%d:%d", message.Chat.ID, message.MessageID)
-	statusMessage, _ := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID, nil)
+	statusMessage, err := api.SendMessage(ctx, message.Chat.ID, "Processing your request...", message.MessageID, nil)
+	if err != nil {
+		logger.Warn("failed to send status message", zap.Error(err), zap.Int64("chat_id", message.Chat.ID))
+	}
 	statusUpdater := newStatusUpdater(ctx, api, message.Chat.ID, statusMessage.MessageID, &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
@@ -121,12 +124,13 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 	fileName, sourceURL, fileID, useMTProtoFallback, err := h.resolveSource(ctx, api, message)
 	if err != nil {
 		_ = statusUpdater.UpdateAndRemoveMarkup("Please send a direct URL or attach a document")
-		logger.Debug("message ignored", zap.Error(err))
+		logger.Debug("message ignored", zap.Error(err), zap.Int64("chat_id", message.Chat.ID))
 		return
 	}
-	logger.Debug("source resolved",
+	logger.Info("download started",
+		zap.Int64("chat_id", message.Chat.ID),
+		zap.Int64("from_user_id", messageFromID(message)),
 		zap.String("file_name", fileName),
-		zap.String("source_url", sourceURL),
 		zap.Bool("use_mtproto_fallback", useMTProtoFallback),
 	)
 
@@ -147,6 +151,7 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 	}()
 	if useMTProtoFallback {
 		if h.fallback == nil {
+			logger.Warn("mtproto fallback required but not configured")
 			_ = statusUpdater.UpdateAndRemoveMarkup("Download failed: mtproto fallback is not configured")
 			return
 		}
@@ -267,13 +272,22 @@ func (h *Handler) handler(ctx context.Context, message Message, api *API) {
 	if err = api.DeleteMessage(ctx, statusUpdater.chatID, statusUpdater.messageID); err != nil {
 		logger.Error("failed to delete update status message", zap.Error(err))
 	}
+	logger.Info("download completed",
+		zap.Int64("chat_id", message.Chat.ID),
+		zap.Int64("from_user_id", messageFromID(message)),
+		zap.String("file_name", fileName),
+		zap.String("public_url", publicURL),
+	)
 	return
 }
 
 func checkAccess(ctx context.Context, message Message, h *Handler, logger *zap.Logger, api *API) bool {
 	if message.From != nil && len(h.allowedIDs) > 0 {
 		if _, ok := h.allowedIDs[message.From.ID]; !ok {
-			logger.Debug("message rejected by allow list", zap.Int64("from_user_id", message.From.ID))
+			logger.Warn("access denied",
+				zap.Int64("from_user_id", message.From.ID),
+				zap.Int64("chat_id", message.Chat.ID),
+			)
 			_, _ = api.SendMessage(ctx, message.Chat.ID, "You are not allowed to use this bot", message.MessageID, nil)
 			return true
 		}
@@ -286,10 +300,22 @@ func printIDs(ctx context.Context, message Message, api *API) {
 	if message.From != nil {
 		fromID = message.From.ID
 	}
+	log.Of(ctx).Info("user requested ids",
+		zap.Int64("chat_id", message.Chat.ID),
+		zap.Int64("from_user_id", fromID),
+		zap.Int64("message_id", message.MessageID),
+	)
 	body := fmt.Sprintf(`chat_id: %d
 from_user_id: %d
 message_id: %d`, message.Chat.ID, fromID, message.MessageID)
 	_, _ = api.SendMessage(ctx, message.Chat.ID, body, message.MessageID, nil)
+}
+
+func messageFromID(message Message) int64 {
+	if message.From != nil {
+		return message.From.ID
+	}
+	return 0
 }
 
 func (h *Handler) resolveSource(ctx context.Context, api *API, message Message) (string, string, string, bool, error) {
@@ -510,6 +536,12 @@ func NewAPI(client *http.Client, token string) *API {
 	return &API{client: client, token: token, baseURL: "https://api.telegram.org"}
 }
 
+// logError records a failed Bot API call. Callers may also log at a higher
+// level, but logging here guarantees no API error is ever dropped silently.
+func (a *API) logError(ctx context.Context, method string, err error) {
+	log.Of(ctx).Debug("telegram api error", zap.String("method", method), zap.Error(err))
+}
+
 func (a *API) BuildFileDownloadURL(filePath string) string {
 	return fmt.Sprintf("%s/file/bot%s/%s", a.baseURL, a.token, strings.TrimLeft(filePath, "/"))
 }
@@ -539,12 +571,14 @@ func (a *API) GetUpdatesWithLimit(ctx context.Context, offset int64, timeout int
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("getUpdates"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "getUpdates", err)
 		return nil, fmt.Errorf("create getUpdates request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "getUpdates", err)
 		return nil, fmt.Errorf("getUpdates request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -552,10 +586,13 @@ func (a *API) GetUpdatesWithLimit(ctx context.Context, offset int64, timeout int
 
 	var payload apiResponse[[]Update]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "getUpdates", err)
 		return nil, fmt.Errorf("decode getUpdates response: %w", err)
 	}
 	if !payload.OK {
-		return nil, fmt.Errorf("getUpdates failed: %s", payload.Description)
+		err = fmt.Errorf("getUpdates failed: %s", payload.Description)
+		a.logError(ctx, "getUpdates", err)
+		return nil, err
 	}
 	return payload.Result, nil
 }
@@ -576,6 +613,7 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 	if replyMarkup != nil {
 		markupBytes, err := json.Marshal(replyMarkup)
 		if err != nil {
+			a.logError(ctx, "sendMessage", err)
 			return Message{}, fmt.Errorf("marshal reply markup: %w", err)
 		}
 		values.Set("reply_markup", string(markupBytes))
@@ -583,12 +621,14 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("sendMessage"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "sendMessage", err)
 		return Message{}, fmt.Errorf("create sendMessage request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "sendMessage", err)
 		return Message{}, err
 	}
 	defer resp.Body.Close()
@@ -596,14 +636,17 @@ func (a *API) SendMessage(ctx context.Context, chatID int64, text string, replyT
 
 	var payload apiResponse[Message]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "sendMessage", err)
 		return Message{}, err
 	}
 	if !payload.OK {
-		return Message{}, &apiError{
+		err = &apiError{
 			method:      "sendMessage",
 			description: payload.Description,
 			retryAfter:  payload.retryAfter(),
 		}
+		a.logError(ctx, "sendMessage", err)
+		return Message{}, err
 	}
 	return payload.Result, nil
 }
@@ -662,12 +705,14 @@ func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("getFile"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "getFile", err)
 		return File{}, fmt.Errorf("create getFile request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "getFile", err)
 		return File{}, err
 	}
 	defer resp.Body.Close()
@@ -675,10 +720,13 @@ func (a *API) GetFile(ctx context.Context, fileID string) (File, error) {
 
 	var payload apiResponse[File]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "getFile", err)
 		return File{}, err
 	}
 	if !payload.OK {
-		return File{}, fmt.Errorf("getFile failed: %s", payload.Description)
+		err = fmt.Errorf("getFile failed: %s", payload.Description)
+		a.logError(ctx, "getFile", err)
+		return File{}, err
 	}
 	return payload.Result, nil
 }
@@ -697,12 +745,14 @@ func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("forwardMessage"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "forwardMessage", err)
 		return Message{}, fmt.Errorf("create forwardMessage request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "forwardMessage", err)
 		return Message{}, err
 	}
 	defer resp.Body.Close()
@@ -710,10 +760,13 @@ func (a *API) ForwardMessage(ctx context.Context, toChatID int64, fromChatID int
 
 	var payload apiResponse[Message]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "forwardMessage", err)
 		return Message{}, err
 	}
 	if !payload.OK {
-		return Message{}, fmt.Errorf("forwardMessage failed: %s", payload.Description)
+		err = fmt.Errorf("forwardMessage failed: %s", payload.Description)
+		a.logError(ctx, "forwardMessage", err)
+		return Message{}, err
 	}
 	return payload.Result, nil
 }
@@ -730,12 +783,14 @@ func (a *API) SendDocument(ctx context.Context, chatID int64, fileID string) (Me
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("sendDocument"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "sendDocument", err)
 		return Message{}, fmt.Errorf("create sendDocument request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "sendDocument", err)
 		return Message{}, err
 	}
 	defer resp.Body.Close()
@@ -743,10 +798,13 @@ func (a *API) SendDocument(ctx context.Context, chatID int64, fileID string) (Me
 
 	var payload apiResponse[Message]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "sendDocument", err)
 		return Message{}, err
 	}
 	if !payload.OK {
-		return Message{}, fmt.Errorf("sendDocument failed: %s", payload.Description)
+		err = fmt.Errorf("sendDocument failed: %s", payload.Description)
+		a.logError(ctx, "sendDocument", err)
+		return Message{}, err
 	}
 	return payload.Result, nil
 }
@@ -763,12 +821,14 @@ func (a *API) DeleteMessage(ctx context.Context, chatID int64, messageID int64) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("deleteMessage"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "deleteMessage", err)
 		return fmt.Errorf("create deleteMessage request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "deleteMessage", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -776,10 +836,13 @@ func (a *API) DeleteMessage(ctx context.Context, chatID int64, messageID int64) 
 
 	var payload apiResponse[json.RawMessage]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "deleteMessage", err)
 		return err
 	}
 	if !payload.OK {
-		return fmt.Errorf("deleteMessage failed: %s", payload.Description)
+		err = fmt.Errorf("deleteMessage failed: %s", payload.Description)
+		a.logError(ctx, "deleteMessage", err)
+		return err
 	}
 	return nil
 }
@@ -796,12 +859,14 @@ func (a *API) AnswerCallbackQuery(ctx context.Context, callbackQueryID string, t
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("answerCallbackQuery"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "answerCallbackQuery", err)
 		return fmt.Errorf("create answerCallbackQuery request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "answerCallbackQuery", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -809,10 +874,13 @@ func (a *API) AnswerCallbackQuery(ctx context.Context, callbackQueryID string, t
 
 	var payload apiResponse[json.RawMessage]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "answerCallbackQuery", err)
 		return err
 	}
 	if !payload.OK {
-		return fmt.Errorf("answerCallbackQuery failed: %s", payload.Description)
+		err = fmt.Errorf("answerCallbackQuery failed: %s", payload.Description)
+		a.logError(ctx, "answerCallbackQuery", err)
+		return err
 	}
 	return nil
 }
@@ -831,6 +899,7 @@ func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64
 	if replyMarkup != nil {
 		markupBytes, err := json.Marshal(replyMarkup)
 		if err != nil {
+			a.logError(ctx, "editMessageText", err)
 			return fmt.Errorf("marshal reply markup: %w", err)
 		}
 		values.Set("reply_markup", string(markupBytes))
@@ -838,12 +907,14 @@ func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint("editMessageText"), strings.NewReader(values.Encode()))
 	if err != nil {
+		a.logError(ctx, "editMessageText", err)
 		return fmt.Errorf("create editMessageText request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.logError(ctx, "editMessageText", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -851,10 +922,13 @@ func (a *API) EditMessageText(ctx context.Context, chatID int64, messageID int64
 
 	var payload apiResponse[json.RawMessage]
 	if err = json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		a.logError(ctx, "editMessageText", err)
 		return err
 	}
 	if !payload.OK {
-		return fmt.Errorf("editMessageText failed: %s", payload.Description)
+		err = fmt.Errorf("editMessageText failed: %s", payload.Description)
+		a.logError(ctx, "editMessageText", err)
+		return err
 	}
 	return nil
 }
@@ -1028,6 +1102,11 @@ func (u *statusUpdater) Update(text string) error {
 		return nil
 	}
 	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text, u.replyMarkup); err != nil {
+		log.Of(u.ctx).Debug("status update failed",
+			zap.Error(err),
+			zap.Int64("chat_id", u.chatID),
+			zap.Int64("message_id", u.messageID),
+		)
 		return err
 	}
 	u.lastText = text
@@ -1041,6 +1120,11 @@ func (u *statusUpdater) UpdateAndRemoveMarkup(text string) error {
 		return nil
 	}
 	if err := u.api.EditMessageText(u.ctx, u.chatID, u.messageID, text, nil); err != nil {
+		log.Of(u.ctx).Debug("status update failed",
+			zap.Error(err),
+			zap.Int64("chat_id", u.chatID),
+			zap.Int64("message_id", u.messageID),
+		)
 		return err
 	}
 	u.lastText = text
